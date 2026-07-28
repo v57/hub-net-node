@@ -1,0 +1,46 @@
+name: hub-net-node
+
+services:
+  node:
+    image: hub-net-node:${HUB_NET_NODE_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${HUB_NET_NODE_VERSION:-dev}
+    command:
+      - -node-id
+      - ${HUB_NET_NODE_ID:-default}
+      - -listen
+      - 0.0.0.0:1964
+      - -state-dir
+      - /var/lib/hub-net-node
+    ports:
+      - "${HUB_NET_NODE_BIND:-0.0.0.0}:${HUB_NET_NODE_PORT:-1964}:1964/tcp"
+      - "${HUB_NET_NODE_BIND:-0.0.0.0}:${HUB_NET_NODE_PORT:-1964}:1964/udp"
+    volumes:
+      - hub-net-node-state:/var/lib/hub-net-node
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:1964/healthz
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  hub-net-node-state:

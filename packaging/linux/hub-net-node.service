@@ -1,0 +1,31 @@
+[Unit]
+Description=Hub Network Rendezvous Node
+Documentation=https://github.com/v57/hub-net-node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hub-net-node
+Group=hub-net-node
+EnvironmentFile=-/etc/default/hub-net-node
+ExecStart=/usr/bin/hub-net-node --node-id=${HUB_NET_NODE_ID} --listen=${HUB_NET_NODE_LISTEN} --state-dir=/var/lib/hub-net-node
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+StateDirectory=hub-net-node
+StateDirectoryMode=0700
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

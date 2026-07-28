@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: make VERSION="${GITHUB_REF_NAME#v}" release-gate
+      - run: make fuzz
+      - run: |
+          docker build --build-arg VERSION="${GITHUB_REF_NAME#v}" -t hub-net-node:release .
+          docker run -d --name hub-net-node-release -p 1964:1964/tcp -p 1964:1964/udp hub-net-node:release
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' hub-net-node-release)
+            [ "$status" = healthy ] && break
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' hub-net-node-release)" = healthy
+          docker stop --time 10 hub-net-node-release
+          test "$(docker inspect -f '{{.State.ExitCode}}' hub-net-node-release)" = 0
+
+  privileged-nat:
+    runs-on: [self-hosted, linux, x64, hub-net-privileged]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo -E make integration-two-nat
+      - run: sudo -E make integration-nat-matrix
+
+  release:
+    needs: [verify, privileged-nat]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make VERSION="${GITHUB_REF_NAME#v}" package checksums
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: build/hub-net-node-*.tar.gz
+      - uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            build/hub-net-node-*.tar.gz
+            build/hub-net-node-*.tar.gz.sha256
+          generate_release_notes: true
+          make_latest: true

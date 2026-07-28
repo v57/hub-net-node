@@ -1,0 +1,150 @@
+# hub-net-node
+
+Self-hostable Hub Network rendezvous node. A coordination service, never a
+WireGuard peer or application traffic relay. The first release advertises
+exactly one role: `rendezvous`. Agents use it to exchange endpoint candidates
+and perform NAT traversal after a Hub-signed ticket; application packets then
+travel directly between agents over WireGuard and never traverse the node.
+
+See [`PROTOCOL.md`](PROTOCOL.md) for the wire contract and no-payload
+invariant, and [`../openspec/changes/hub-network/`](../openspec/changes/hub-network/)
+for the cross-project change that defines this node.
+
+## Status
+
+Ticket verification, bounded rendezvous sessions, candidate exchange,
+rate/retention limits, strict no-payload validation, and deployment assets are
+implemented. `/healthz` reports protocol capabilities and live session count;
+`/rendezvous` serves the WebSocket coordination protocol.
+
+| Task    | Area                                  | Status                                                                                                                                   |
+|---------|---------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| HN-400  | Scaffold, config, health, versioning  | Complete: root `hubnetnode` package, `server`, `config`, `health`, `version`, `logging`; `/healthz` + `/rendezvous` wire stub; examples |
+| HN-401  | Ticket verification, no registration  | Complete: self-contained Hub SPKI signature, lifetime, purpose, role, identity, network, and node binding validation                    |
+| HN-402  | Session lifecycle, candidate exchange | Complete                                                                                                                                 |
+| HN-403  | Rate, size, connection, retention     | Complete                                                                                                                                 |
+| HN-404  | No-payload forwarding proof           | Complete                                                                                                                                 |
+| HN-405  | Container, standalone deployment      | Complete: packaged Linux binary and hardened container pass health, checksum, unprivileged-runtime, and SIGTERM acceptance                |
+| HN-406  | Two-NAT integration                   | Complete: isolated nftables NATs, real WireGuard traffic, packet-capture no-relay assertion on Ubuntu amd64                              |
+| HN-407  | Sibling-module build repair           | Complete: removed local `replace` directives, consumes published `channel-go`/`hub-service-go v0.1.0`, clean Docker build                 |
+| HN-408  | RFC 6455 frame-parser hardening       | Complete: attacker-controlled length can no longer panic or over-allocate; masking/reserved-bit/opcode/control-frame validation enforced |
+| HN-412  | Single-use rendezvous tickets         | Complete: post-verification atomic consumption, expiry sweeping, global/source bounds, documented restart and replica boundary           |
+
+Cross-project context: [`../openspec/changes/hub-network/protocol-foundations.md`](../openspec/changes/hub-network/protocol-foundations.md).
+
+## Layout
+
+```
+hub-net-node/
+├── protocol/      # Hub Network rendezvous wire models, capabilities, envelope validation
+├── config/        # Node ID, bind address, state dir, operator-tunable limits
+├── logging/       # slog helpers, JSON/text formats, component tagging
+├── version/       # Major/minor from protocol constants, link-time build identifier
+├── health/        # /healthz JSON snapshot, session counter, liveness
+├── server/        # HTTP/WebSocket server, Prepare/Run/Shutdown lifecycle, /rendezvous stub
+├── cmd/            # Production hub-net-node command
+├── packaging/      # systemd, sysusers, tmpfiles, install/upgrade docs
+├── integration/    # Privileged Linux two-NAT direct-traffic proof
+├── examples/basic  # Minimal embedding example
+└── node.go        # Root hubnetnode package: Agent aggregates server + config + health
+```
+
+## Build
+
+```
+make test
+make integration-linux
+sudo make integration-two-nat
+make VERSION=1.0.0 package
+```
+
+Dependencies resolve from their published Go module versions; no sibling
+checkout is required for native builds.
+
+## Release gates
+
+Go version is pinned by `go.mod`. Every change builds, vets, runs race tests,
+the checked-in WebSocket fuzz seeds, malformed-frame process survival,
+connection-exhaustion tests, `govulncheck`, and Linux standalone/container
+health plus SIGTERM smoke checks. Version tags additionally run privileged
+two-NAT/NAT-matrix jobs on the `hub-net-privileged` Ubuntu amd64 runner.
+
+Tagged releases are immutable archives with SHA-256 manifests and GitHub
+artifact attestations. Release fails on any `govulncheck` finding affecting
+called code; unresolved critical/high findings block publication. Container
+images must become healthy and exit cleanly on SIGTERM before release.
+
+## Configuration
+
+Production binary accepts flags:
+
+```
+./build/hub-net-node \
+  -node-id public-1 \
+  -listen :1964 \
+  -state-dir /var/lib/hub-net-node \
+  -log-json
+```
+
+Version 1 deliberately uses `admissionPolicy: open`: any self-hosted Hub may
+present a self-contained signed ticket. Signature validation proves ticket
+integrity and binding only; it is not operator trust or Sybil resistance.
+`-max-connections` (default 256) and `-max-connections-per-source` (default 16)
+therefore bound sockets independently of attacker-rotatable Hub and agent keys.
+HTTP headers are capped at 8 KiB and incomplete handshakes expire after 10
+seconds. Authenticated UDP observations are capped at 16,384 globally and 256
+per source IP, then swept at ticket expiry. Deploy behind a source-preserving
+reverse proxy; otherwise TCP limits see the proxy address. Private deployments
+needing Hub allowlists must add an external admission proxy until a trusted-Hub
+policy is implemented.
+
+## Container
+
+Build from the `hub-net-node` repository:
+
+```sh
+docker build --build-arg VERSION=1.0.0 -t hub-net-node:1.0.0 .
+docker run --rm -p 1964:1964/tcp -p 1964:1964/udp \
+  -v hub-net-node-state:/var/lib/hub-net-node \
+  hub-net-node:1.0.0 --node-id public-1
+```
+
+Image runs as non-root UID/GID 65532, includes `/healthz` health check, persists
+state in `/var/lib/hub-net-node`, and handles SIGTERM gracefully. Put a TLS
+reverse proxy in front of public deployments.
+
+Docker Compose uses the same workspace-root build context:
+
+```sh
+docker compose -f hub-net-node/compose.yaml up -d --build
+curl --fail http://127.0.0.1:1964/healthz
+docker compose -f hub-net-node/compose.yaml down
+```
+
+Optional variables: `HUB_NET_NODE_VERSION`, `HUB_NET_NODE_ID`,
+`HUB_NET_NODE_BIND`, and `HUB_NET_NODE_PORT`. State remains in the named
+`hub-net-node-state` volume when the service is recreated.
+
+Standalone Linux install, upgrade, uninstall, systemd, dedicated-user, and
+directory instructions live in [`packaging/linux/README.md`](packaging/linux/README.md).
+
+`Limits` are operator-tunable and documented in `config/config.go`. Defaults
+match [`PROTOCOL.md`](PROTOCOL.md): 16 sessions per agent, 16 candidates per
+session, 16 KiB per message, 20 messages per second, two-minute session
+lifetime, 30-second candidate lifetime. Operators may lower limits; raising
+them is a deployment choice that does not change the wire protocol.
+
+## Trust boundary
+
+The node is **not trusted with application data or authorization**. It:
+
+- validates Hub-signed rendezvous tickets without prior Hub registration
+  (HN-401);
+- reports observed UDP endpoints separately from client-declared candidates;
+- never treats a candidate as an authorization grant;
+- accepts only bounded, typed coordination fields; unknown JSON fields are
+  discarded and never forwarded (no-payload invariant, see
+  [`protocol/protocol_test.go`](protocol/protocol_test.go)).
+
+Authorization is established by agents against their configured Hub. The node
+sees coordination timing and public endpoints only.

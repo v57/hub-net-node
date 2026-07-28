@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go test ./transport/ws -run '^$' -fuzz FuzzReadFrame -fuzztime 30s
+      - run: go test ./server -run 'TestAdmissionListenerBoundsIncompleteConnections|TestProcessSurvivesMalformedFrames' -count=1
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  linux-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make VERSION=ci package checksums
+      - run: |
+          build/hub-net-node -listen 127.0.0.1:1964 -state-dir "$RUNNER_TEMP/node" &
+          node_pid=$!
+          trap 'kill -TERM "$node_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:1964/healthz && break
+            sleep 0.2
+          done
+          curl -fsS http://127.0.0.1:1964/healthz
+          kill -TERM "$node_pid"
+          wait "$node_pid"
+      - run: |
+          docker build --build-arg VERSION=ci -t hub-net-node:ci .
+          docker run -d --name hub-net-node -p 1964:1964 hub-net-node:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' hub-net-node)
+            [ "$status" = healthy ] && break
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' hub-net-node)" = healthy
+          docker stop --time 10 hub-net-node
+          test "$(docker inspect -f '{{.State.ExitCode}}' hub-net-node)" = 0
+
+  privileged-nat:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, linux, x64, hub-net-privileged]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo -E make integration-two-nat
+      - run: sudo -E make integration-nat-matrix
