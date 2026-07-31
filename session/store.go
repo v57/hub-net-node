@@ -33,12 +33,15 @@ type ObservedEndpoint = protocol.ObservedEndpoint
 
 // Session is the live rendezvous state for one opener.
 type Session struct {
-	ID           string
-	HubNetworkID string
-	AgentKey     string
-	ProfileKey   string
-	OpenedAt     time.Time
-	ExpiresAt    time.Time
+	ID               string
+	HubNetworkID     string
+	AgentKey         string
+	ProfileKey       string
+	TransactionID    string
+	TunnelInstanceID string
+	Generation       uint64
+	OpenedAt         time.Time
+	ExpiresAt        time.Time
 	// PeerID is the matched peer's session id, empty until paired.
 	PeerID string
 	// Observed is the transport source the node saw on open, reported to the
@@ -76,6 +79,7 @@ var (
 	ErrCandidateExpired     = errors.New("session: candidate expired")
 	ErrNotMatched           = errors.New("session: no matched peer")
 	ErrCandidateBinding     = errors.New("session: candidate binding mismatch")
+	ErrBootstrapPeer        = errors.New("session: invalid bootstrap peer")
 )
 
 // Store is the concurrency-safe rendezvous session map. Construct with New and
@@ -85,6 +89,38 @@ type Store struct {
 	sessions map[string]*Session
 	limits   Limits
 	now      func() time.Time
+}
+
+// OpenBootstrap opens one invitation-scoped session. Exactly two distinct
+// peers may use a token and one of them must be the invitation's bound agent.
+func (s *Store) OpenBootstrap(ticket network.RendezvousTicket, observed protocol.ObservedEndpoint, invitingAgentKey, transactionID, tunnelInstanceID string, generation uint64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	var live []*Session
+	for _, existing := range s.sessions {
+		if existing.HubNetworkID == ticket.HubNetworkID && !s.expiredLocked(existing, now) {
+			live = append(live, existing)
+		}
+	}
+	if len(live) >= 2 {
+		return "", ErrBootstrapPeer
+	}
+	for _, existing := range live {
+		if existing.AgentKey == ticket.AgentKey ||
+			(existing.AgentKey != invitingAgentKey && ticket.AgentKey != invitingAgentKey) ||
+			existing.TransactionID != transactionID ||
+			existing.TunnelInstanceID != tunnelInstanceID || existing.Generation != generation {
+			return "", ErrBootstrapPeer
+		}
+	}
+	id, err := s.openLocked(ticket, observed, now)
+	if err == nil {
+		s.sessions[id].TransactionID = transactionID
+		s.sessions[id].TunnelInstanceID = tunnelInstanceID
+		s.sessions[id].Generation = generation
+	}
+	return id, err
 }
 
 // New returns a Store enforcing the given protocol limits. now defaults to
@@ -110,8 +146,10 @@ func (s *Store) Limits() Limits { return s.limits }
 func (s *Store) Open(ticket network.RendezvousTicket, observed protocol.ObservedEndpoint) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
+	return s.openLocked(ticket, observed, s.now())
+}
 
+func (s *Store) openLocked(ticket network.RendezvousTicket, observed protocol.ObservedEndpoint, now time.Time) (string, error) {
 	agent := ticket.AgentKey
 	if agent == "" {
 		return "", errors.New("session: ticket has no agent binding")
@@ -138,6 +176,9 @@ func (s *Store) Open(ticket network.RendezvousTicket, observed protocol.Observed
 		OpenedAt:     now,
 		ExpiresAt:    now.Add(s.limits.SessionLifetime),
 		Observed:     observed,
+	}
+	if ticketExpiresAt, err := time.Parse(time.RFC3339Nano, ticket.ExpiresAt); err == nil && ticketExpiresAt.Before(session.ExpiresAt) {
+		session.ExpiresAt = ticketExpiresAt
 	}
 	session.Observed.Version = network.WireVersion
 	session.Observed.AgentKey = agent
@@ -218,6 +259,12 @@ func (s *Store) List(sessionID string) ([]network.Candidate, protocol.ObservedEn
 	// Copy so callers cannot mutate stored state.
 	out := make([]network.Candidate, len(peer.Candidates))
 	copy(out, peer.Candidates)
+	// Session ids are connection-local capabilities. Rebind peer candidates to
+	// the recipient id before delivery so one peer never learns or can target
+	// the other's session capability.
+	for index := range out {
+		out[index].SessionID = sessionID
+	}
 	return out, peer.Observed, nil
 }
 

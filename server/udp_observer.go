@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/v57/hub-net-node/invitation"
 	"github.com/v57/hub-net-node/protocol"
 	network "github.com/v57/hub-service-go/protocol"
 )
@@ -162,25 +163,50 @@ func (s *Server) serveUDPObservations(ctxDone <-chan struct{}, conn *net.UDPConn
 		if n > maxUDPProbeBytes {
 			continue
 		}
-		var probe protocol.UDPProbe
-		decoder := json.NewDecoder(bytes.NewReader(buffer[:n]))
-		decoder.DisallowUnknownFields()
-		if decoder.Decode(&probe) != nil || probe.Version != network.WireVersion {
+		ticket, ok := s.verifyUDPProbe(buffer[:n], time.Now())
+		if !ok {
 			continue
 		}
-		if err := s.tickets.Verify(probe.Ticket); err != nil {
-			continue
-		}
-		expiresAt, err := time.Parse(time.RFC3339Nano, probe.Ticket.ExpiresAt)
-		if err != nil {
-			continue
-		}
-		if !s.udpObserved.put(probe.Ticket, address, expiresAt, time.Now()) {
+		expiresAt, _ := time.Parse(time.RFC3339Nano, ticket.ExpiresAt)
+		if !s.udpObserved.put(ticket, address, expiresAt, time.Now()) {
 			continue
 		}
 		response, _ := json.Marshal(protocol.UDPProbeResponse{
-			Version: network.WireVersion, TicketID: probe.Ticket.TicketID,
+			Version: network.WireVersion, TicketID: ticket.TicketID,
 		})
 		_, _ = conn.WriteToUDP(response, address)
 	}
+}
+
+func (s *Server) verifyUDPProbe(payload []byte, now time.Time) (network.RendezvousTicket, bool) {
+	var ticketProbe protocol.UDPProbe
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&ticketProbe) == nil && ticketProbe.Version == network.WireVersion && s.tickets.Verify(ticketProbe.Ticket) == nil {
+		return ticketProbe.Ticket, true
+	}
+
+	var probe protocol.InvitationUDPProbe
+	decoder = json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&probe) != nil || probe.Version != network.WireVersion || probe.AgentKey == "" || probe.ProfileKey == "" || probe.TransactionID == "" {
+		return network.RendezvousTicket{}, false
+	}
+	verified, err := invitation.VerifyCode(probe.InvitationCode, now)
+	if err != nil || invitation.ValidatePeer(verified, probe.AgentKey) != nil || probe.TokenDigest != verified.TokenDigest {
+		return network.RendezvousTicket{}, false
+	}
+	if verified.BindingKind == "apple-app" {
+		if probe.TunnelInstanceID != verified.TunnelInstanceID || probe.Generation != verified.Generation {
+			return network.RendezvousTicket{}, false
+		}
+	} else if probe.TunnelInstanceID != "" || probe.Generation != 0 {
+		return network.RendezvousTicket{}, false
+	}
+	return network.RendezvousTicket{
+		Version: network.WireVersion, TicketID: verified.TokenDigest + ":" + probe.AgentKey,
+		HubKey: verified.HubKey, HubNetworkID: verified.TokenDigest,
+		ProfileKey: probe.ProfileKey, AgentKey: probe.AgentKey, NodeID: s.cfg.NodeID,
+		Roles: []string{"rendezvous"}, IssuedAt: verified.IssuedAt, ExpiresAt: verified.ExpiresAt,
+	}, true
 }

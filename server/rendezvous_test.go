@@ -2,6 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,6 +19,7 @@ import (
 
 	"github.com/v57/hub-net-node/config"
 	"github.com/v57/hub-net-node/internal/testticket"
+	"github.com/v57/hub-net-node/invitation"
 	"github.com/v57/hub-net-node/protocol"
 	network "github.com/v57/hub-service-go/protocol"
 )
@@ -134,6 +140,82 @@ func sendUDPProbe(t *testing.T, address string, ticket network.RendezvousTicket)
 		t.Fatalf("UDP probe response = %+v", response)
 	}
 	return conn.LocalAddr().(*net.UDPAddr)
+}
+
+func sendInvitationUDPProbe(t *testing.T, address string, probe protocol.InvitationUDPProbe) *net.UDPAddr {
+	t.Helper()
+	remote, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.DialUDP("udp", nil, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	body, err := json.Marshal(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	responseBody := make([]byte, 1024)
+	if _, err := conn.Read(responseBody); err != nil {
+		t.Fatalf("read invitation UDP probe response: %v", err)
+	}
+	return conn.LocalAddr().(*net.UDPAddr)
+}
+
+func signedInvitation(t *testing.T, now time.Time, bindingKind string) (code, digest, invitingAgent string) {
+	t.Helper()
+	hubPublic, hubPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubDER, err := x509.MarshalPKIXPublicKey(hubPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := make([]byte, 32)
+	if _, err := rand.Read(token); err != nil {
+		t.Fatal(err)
+	}
+	invitingAgent = base64.StdEncoding.EncodeToString(make([]byte, 32))
+	value := map[string]any{
+		"version": 1, "signatureDomain": invitation.SignatureDomain,
+		"tokenId":  base64.RawURLEncoding.EncodeToString(token),
+		"issuedAt": now.Format(time.RFC3339Nano), "expiresAt": now.Add(invitation.MaxLifetime).Format(time.RFC3339Nano),
+		"hubKey": base64.StdEncoding.EncodeToString(hubDER), "invitingAgentKey": invitingAgent,
+		"invitingAgentAddress": "100.96.0.2", "hubProHost": "100.96.0.1",
+		"bindingKind": bindingKind,
+		"scopes":      []any{map[string]any{"audience": "node", "actions": []any{"bootstrap-rendezvous"}}},
+	}
+	if bindingKind == "apple-app" {
+		value["tunnelInstanceId"] = "tunnel-live"
+		value["generation"] = uint64(7)
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := append([]byte(invitation.SignatureDomain), 0)
+	length := make([]byte, 4)
+	binary.BigEndian.PutUint32(length, uint32(len(payload)))
+	input = append(input, length...)
+	input = append(input, payload...)
+	value["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(hubPrivate, input))
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenDigest := sha256.Sum256(token)
+	return base64.RawURLEncoding.EncodeToString(raw), base64.RawURLEncoding.EncodeToString(tokenDigest[:]), invitingAgent
+}
+
+func signedAppleInvitation(t *testing.T, now time.Time) (code, digest, invitingAgent string) {
+	return signedInvitation(t, now, "apple-app")
 }
 
 // sendEnvelope writes one masked client text frame carrying a JSON envelope.
@@ -317,6 +399,221 @@ func TestSessionLifecycleEndToEnd(t *testing.T) {
 	}
 }
 
+func TestAppleInvitationSessionPinsAuthorizationAndExchangesCandidates(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	now := time.Now().UTC()
+	code, digest, invitingAgent := signedAppleInvitation(t, now)
+	transactionID := "transaction-apple-1"
+
+	open := func(agentKey, profileKey string) (net.Conn, protocol.Envelope, *net.UDPAddr) {
+		t.Helper()
+		probe := protocol.InvitationUDPProbe{
+			Version: 1, InvitationCode: code, AgentKey: agentKey, ProfileKey: profileKey,
+			TokenDigest: digest, TransactionID: transactionID,
+			TunnelInstanceID: "tunnel-live", Generation: 7,
+		}
+		observed := sendInvitationUDPProbe(t, address, probe)
+		conn := dialClient(t, address)
+		sendEnvelope(t, conn, protocol.Envelope{
+			MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
+			InvitationCode: code, AgentKey: agentKey, ProfileKey: profileKey,
+			TokenDigest: digest, TransactionID: transactionID,
+			TunnelInstance: "tunnel-live", Generation: 7,
+		})
+		opened := readEnvelope(t, conn)
+		if opened.Type != protocol.MessageSessionOpened || opened.SessionID == "" {
+			conn.Close()
+			t.Fatalf("invitation open = %+v", opened)
+		}
+		return conn, opened, observed
+	}
+
+	inviter, inviterOpened, inviterObserved := open(invitingAgent, "inviter-profile")
+	defer inviter.Close()
+	joiner, joinerOpened, _ := open("joiner-wireguard-key", "joiner-profile")
+	defer joiner.Close()
+
+	candidate := network.Candidate{
+		Version: 1, CandidateID: "apple-candidate", SessionID: inviterOpened.SessionID,
+		AgentKey: invitingAgent, Kind: "host", Transport: "udp",
+		Address: "192.0.2.44", Port: 51820, Priority: 100,
+		ExpiresAt: now.Add(protocol.DefaultCandidateLifetime).Format(time.RFC3339Nano),
+	}
+	sendEnvelope(t, inviter, protocol.Envelope{
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOfferCandidate,
+		SessionID: inviterOpened.SessionID, Candidate: &candidate,
+	})
+	_ = joiner.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 5; i++ {
+		message := readEnvelope(t, joiner)
+		if message.Type != protocol.MessageCandidates || len(message.Candidates) == 0 {
+			continue
+		}
+		if message.SessionID != joinerOpened.SessionID || message.Candidates[0].SessionID != joinerOpened.SessionID || message.Candidates[0].AgentKey != invitingAgent {
+			t.Fatalf("candidate delivery = %+v", message)
+		}
+		if message.Observed == nil || message.Observed.AgentKey != invitingAgent ||
+			message.Observed.Address != inviterObserved.IP.String() || message.Observed.Port != uint16(inviterObserved.Port) {
+			t.Fatalf("inviter observation = %+v, want %s", message.Observed, inviterObserved)
+		}
+		return
+	}
+	t.Fatal("joiner never received Apple inviter candidate")
+}
+
+func TestMachineInvitationSessionExchangesEquivalentCandidates(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	now := time.Now().UTC()
+	code, digest, invitingAgent := signedInvitation(t, now, "machine")
+	transactionID := "transaction-machine-1"
+
+	open := func(agentKey, profileKey string) (net.Conn, protocol.Envelope, *net.UDPAddr) {
+		t.Helper()
+		probe := protocol.InvitationUDPProbe{
+			Version: 1, InvitationCode: code, AgentKey: agentKey, ProfileKey: profileKey,
+			TokenDigest: digest, TransactionID: transactionID,
+		}
+		observed := sendInvitationUDPProbe(t, address, probe)
+		conn := dialClient(t, address)
+		sendEnvelope(t, conn, protocol.Envelope{
+			MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
+			InvitationCode: code, AgentKey: agentKey, ProfileKey: profileKey,
+			TokenDigest: digest, TransactionID: transactionID,
+		})
+		opened := readEnvelope(t, conn)
+		if opened.Type != protocol.MessageSessionOpened || opened.SessionID == "" {
+			conn.Close()
+			t.Fatalf("machine invitation open = %+v", opened)
+		}
+		return conn, opened, observed
+	}
+
+	inviter, inviterOpened, inviterObserved := open(invitingAgent, "machine-profile")
+	defer inviter.Close()
+	joiner, joinerOpened, _ := open("joiner-wireguard-key", "joiner-profile")
+	defer joiner.Close()
+	candidate := network.Candidate{
+		Version: 1, CandidateID: "machine-candidate", SessionID: inviterOpened.SessionID,
+		AgentKey: invitingAgent, Kind: "host", Transport: "udp",
+		Address: "192.0.2.45", Port: 51820, Priority: 100,
+		ExpiresAt: now.Add(protocol.DefaultCandidateLifetime).Format(time.RFC3339Nano),
+	}
+	sendEnvelope(t, inviter, protocol.Envelope{
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOfferCandidate,
+		SessionID: inviterOpened.SessionID, Candidate: &candidate,
+	})
+	_ = joiner.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 5; i++ {
+		message := readEnvelope(t, joiner)
+		if message.Type != protocol.MessageCandidates || len(message.Candidates) == 0 {
+			continue
+		}
+		if message.SessionID != joinerOpened.SessionID || message.Candidates[0].SessionID != joinerOpened.SessionID || message.Candidates[0].AgentKey != invitingAgent {
+			t.Fatalf("machine candidate delivery = %+v", message)
+		}
+		if message.Observed == nil || message.Observed.AgentKey != invitingAgent ||
+			message.Observed.Address != inviterObserved.IP.String() || message.Observed.Port != uint16(inviterObserved.Port) {
+			t.Fatalf("machine inviter observation = %+v, want %s", message.Observed, inviterObserved)
+		}
+		return
+	}
+	t.Fatal("joiner never received machine inviter candidate")
+}
+
+func TestAppleInvitationRejectsStaleTunnelBeforeStateCreation(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	code, digest, invitingAgent := signedAppleInvitation(t, time.Now().UTC())
+	conn := dialClient(t, address)
+	defer conn.Close()
+	sendEnvelope(t, conn, protocol.Envelope{
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
+		InvitationCode: code, AgentKey: invitingAgent, ProfileKey: "profile",
+		TokenDigest: digest, TransactionID: "transaction",
+		TunnelInstance: "tunnel-stale", Generation: 7,
+	})
+	rejected := readEnvelope(t, conn)
+	if rejected.Type != protocol.MessageError || rejected.Error.Code != "unauthorized" {
+		t.Fatalf("stale tunnel = %+v, want unauthorized", rejected)
+	}
+	if got := fetchHealth(t, address).Sessions; got != 0 {
+		t.Fatalf("sessions after stale tunnel = %d, want 0", got)
+	}
+}
+
+func TestAppleInvitationRejectsReplayAndCleansDisconnectedState(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	code, digest, invitingAgent := signedAppleInvitation(t, time.Now().UTC())
+	probe := protocol.InvitationUDPProbe{
+		Version: 1, InvitationCode: code, AgentKey: invitingAgent, ProfileKey: "profile",
+		TokenDigest: digest, TransactionID: "transaction",
+		TunnelInstanceID: "tunnel-live", Generation: 7,
+	}
+	sendInvitationUDPProbe(t, address, probe)
+	open := protocol.Envelope{
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
+		InvitationCode: code, AgentKey: invitingAgent, ProfileKey: "profile",
+		TokenDigest: digest, TransactionID: "transaction",
+		TunnelInstance: "tunnel-live", Generation: 7,
+	}
+	first := dialClient(t, address)
+	sendEnvelope(t, first, open)
+	if opened := readEnvelope(t, first); opened.Type != protocol.MessageSessionOpened {
+		t.Fatalf("first open = %+v", opened)
+	}
+
+	replay := dialClient(t, address)
+	defer replay.Close()
+	sendEnvelope(t, replay, open)
+	if rejected := readEnvelope(t, replay); rejected.Type != protocol.MessageError || rejected.Error.Code != "replay_detected" {
+		t.Fatalf("replay = %+v, want replay_detected", rejected)
+	}
+	_ = first.Close()
+	for i := 0; i < 50 && fetchHealth(t, address).Sessions != 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := fetchHealth(t, address).Sessions; got != 0 {
+		t.Fatalf("sessions after disconnect = %d, want 0", got)
+	}
+}
+
+func TestAppleInvitationCloseCancelsSessionState(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	code, digest, invitingAgent := signedAppleInvitation(t, time.Now().UTC())
+	probe := protocol.InvitationUDPProbe{
+		Version: 1, InvitationCode: code, AgentKey: invitingAgent, ProfileKey: "profile",
+		TokenDigest: digest, TransactionID: "transaction",
+		TunnelInstanceID: "tunnel-live", Generation: 7,
+	}
+	sendInvitationUDPProbe(t, address, probe)
+	conn := dialClient(t, address)
+	defer conn.Close()
+	sendEnvelope(t, conn, protocol.Envelope{
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
+		InvitationCode: code, AgentKey: invitingAgent, ProfileKey: "profile",
+		TokenDigest: digest, TransactionID: "transaction",
+		TunnelInstance: "tunnel-live", Generation: 7,
+	})
+	opened := readEnvelope(t, conn)
+	if opened.Type != protocol.MessageSessionOpened {
+		t.Fatalf("open = %+v", opened)
+	}
+	sendEnvelope(t, conn, protocol.Envelope{
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageCloseSession,
+		SessionID: opened.SessionID,
+	})
+	for i := 0; i < 50 && fetchHealth(t, address).Sessions != 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := fetchHealth(t, address).Sessions; got != 0 {
+		t.Fatalf("sessions after cancellation = %d, want 0", got)
+	}
+}
+
 // TestOpenRejectsInvalidTicket proves the node never opens a session for an
 // unsigned or tampered ticket (HN-404 authorization boundary).
 func TestOpenRejectsInvalidTicket(t *testing.T) {
@@ -425,6 +722,26 @@ func TestNoPayloadInvariantRejectsSmuggling(t *testing.T) {
 		{
 			name:     "packet field rejected",
 			payload:  []byte(`{"majorVersion":1,"minorVersion":0,"type":"session.close","sessionId":"x","packet":"deadbeef"}`),
+			wantCode: "bad_request",
+		},
+		{
+			name:     "Hub RPC field rejected",
+			payload:  []byte(`{"majorVersion":1,"minorVersion":0,"type":"session.close","sessionId":"x","hubRpc":{"method":"hub/header"}}`),
+			wantCode: "bad_request",
+		},
+		{
+			name:     "enrollment field rejected",
+			payload:  []byte(`{"majorVersion":1,"minorVersion":0,"type":"session.close","sessionId":"x","enrollment":{"profile":"secret"}}`),
+			wantCode: "bad_request",
+		},
+		{
+			name:     "DNS field rejected",
+			payload:  []byte(`{"majorVersion":1,"minorVersion":0,"type":"session.close","sessionId":"x","dns":{"name":"private.hub.invalid"}}`),
+			wantCode: "bad_request",
+		},
+		{
+			name:     "application packet field rejected",
+			payload:  []byte(`{"majorVersion":1,"minorVersion":0,"type":"session.close","sessionId":"x","applicationPacket":"deadbeef"}`),
 			wantCode: "bad_request",
 		},
 	}

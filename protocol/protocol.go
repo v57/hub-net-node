@@ -101,19 +101,39 @@ type UDPProbeResponse struct {
 	TicketID string `json:"ticketId"`
 }
 
+// InvitationUDPProbe authenticates endpoint observation for invitation
+// bootstrap from the same UDP socket that will carry WireGuard.
+type InvitationUDPProbe struct {
+	Version          int    `json:"version"`
+	InvitationCode   string `json:"invitationCode"`
+	AgentKey         string `json:"agentKey"`
+	ProfileKey       string `json:"profileKey"`
+	TokenDigest      string `json:"tokenDigest"`
+	TransactionID    string `json:"transactionId"`
+	TunnelInstanceID string `json:"tunnelInstanceId,omitempty"`
+	Generation       uint64 `json:"generation,omitempty"`
+}
+
 // Envelope deliberately has no payload or data field. The rendezvous protocol
 // accepts only the bounded coordination fields associated with its message type.
 type Envelope struct {
-	MajorVersion int                       `json:"majorVersion"`
-	MinorVersion int                       `json:"minorVersion"`
-	Type         MessageType               `json:"type"`
-	RequestID    string                    `json:"requestId,omitempty"`
-	Ticket       *network.RendezvousTicket `json:"ticket,omitempty"`
-	SessionID    string                    `json:"sessionId,omitempty"`
-	Candidate    *network.Candidate        `json:"candidate,omitempty"`
-	Candidates   []network.Candidate       `json:"candidates,omitempty"`
-	Observed     *ObservedEndpoint         `json:"observedEndpoint,omitempty"`
-	Error        *network.NetworkError     `json:"error,omitempty"`
+	MajorVersion   int                       `json:"majorVersion"`
+	MinorVersion   int                       `json:"minorVersion"`
+	Type           MessageType               `json:"type"`
+	RequestID      string                    `json:"requestId,omitempty"`
+	Ticket         *network.RendezvousTicket `json:"ticket,omitempty"`
+	SessionID      string                    `json:"sessionId,omitempty"`
+	Candidate      *network.Candidate        `json:"candidate,omitempty"`
+	Candidates     []network.Candidate       `json:"candidates,omitempty"`
+	Observed       *ObservedEndpoint         `json:"observedEndpoint,omitempty"`
+	Error          *network.NetworkError     `json:"error,omitempty"`
+	InvitationCode string                    `json:"invitationCode,omitempty"`
+	AgentKey       string                    `json:"agentKey,omitempty"`
+	ProfileKey     string                    `json:"profileKey,omitempty"`
+	TokenDigest    string                    `json:"tokenDigest,omitempty"`
+	TransactionID  string                    `json:"transactionId,omitempty"`
+	TunnelInstance string                    `json:"tunnelInstanceId,omitempty"`
+	Generation     uint64                    `json:"generation,omitempty"`
 }
 
 func (message Envelope) Validate(now time.Time, limits Limits) error {
@@ -131,20 +151,37 @@ func (message Envelope) Validate(now time.Time, limits Limits) error {
 	}
 	switch message.Type {
 	case MessageOpenSession:
-		if message.Ticket == nil {
-			return errors.New("session.open requires a ticket")
+		if (message.Ticket == nil) == (message.InvitationCode == "") {
+			return errors.New("session.open requires exactly one ticket or invitation")
 		}
 		if message.SessionID != "" || message.Candidate != nil || len(message.Candidates) != 0 || message.Observed != nil {
 			return errors.New("session.open contains invalid fields")
 		}
-		if expiresAt, err := time.Parse(time.RFC3339Nano, message.Ticket.ExpiresAt); err != nil || !expiresAt.After(now) {
-			return errors.New("ticket is expired or invalid")
+		if message.Ticket != nil && (message.AgentKey != "" || message.ProfileKey != "") {
+			return errors.New("ticket session contains bootstrap fields")
+		}
+		if message.Ticket != nil {
+			if expiresAt, err := time.Parse(time.RFC3339Nano, message.Ticket.ExpiresAt); err != nil || !expiresAt.After(now) {
+				return errors.New("ticket is expired or invalid")
+			}
+		}
+		if message.InvitationCode != "" && (message.AgentKey == "" || message.ProfileKey == "") {
+			return errors.New("invitation bootstrap requires agent and profile keys")
+		}
+		if message.InvitationCode != "" && (message.TokenDigest == "" || message.TransactionID == "") {
+			return errors.New("invitation bootstrap requires token digest and transaction")
 		}
 	case MessageSessionOpened:
+		if message.InvitationCode != "" || message.AgentKey != "" || message.ProfileKey != "" || message.TokenDigest != "" || message.TransactionID != "" || message.TunnelInstance != "" || message.Generation != 0 {
+			return errors.New("session.opened contains bootstrap fields")
+		}
 		if message.SessionID == "" {
 			return errors.New("session.opened requires a session id")
 		}
 	case MessageOfferCandidate:
+		if message.InvitationCode != "" || message.AgentKey != "" || message.ProfileKey != "" || message.TokenDigest != "" || message.TransactionID != "" || message.TunnelInstance != "" || message.Generation != 0 {
+			return errors.New("candidate.offer contains bootstrap fields")
+		}
 		if message.SessionID == "" || message.Candidate == nil {
 			return errors.New("candidate.offer requires a session and candidate")
 		}
@@ -152,6 +189,9 @@ func (message Envelope) Validate(now time.Time, limits Limits) error {
 			return errors.New("candidate session mismatch")
 		}
 	case MessageCandidates:
+		if message.InvitationCode != "" || message.AgentKey != "" || message.ProfileKey != "" || message.TokenDigest != "" || message.TransactionID != "" || message.TunnelInstance != "" || message.Generation != 0 {
+			return errors.New("candidate.list contains bootstrap fields")
+		}
 		if message.SessionID == "" {
 			return errors.New("candidate.list requires a session")
 		}
@@ -169,6 +209,9 @@ func (message Envelope) Validate(now time.Time, limits Limits) error {
 			}
 		}
 	case MessageCloseSession:
+		if message.InvitationCode != "" || message.AgentKey != "" || message.ProfileKey != "" || message.TokenDigest != "" || message.TransactionID != "" || message.TunnelInstance != "" || message.Generation != 0 {
+			return errors.New("session.close contains bootstrap fields")
+		}
 		if message.SessionID == "" {
 			return errors.New("session.close requires a session")
 		}

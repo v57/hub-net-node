@@ -86,6 +86,89 @@ func TestTwoSessionsMatchAcrossSharedNetwork(t *testing.T) {
 	}
 }
 
+func TestBootstrapSessionsRequireExactTransactionAndAppleGeneration(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	store := New(testLimits(), fixedClock(t, now))
+	ticketA := ticketFor("invite-digest", "apple-agent")
+	if _, err := store.OpenBootstrap(ticketA, ObservedEndpoint{}, "apple-agent", "transaction-1", "tunnel-1", 4); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, values := range map[string][2]string{
+		"cross transaction": {"transaction-2", "tunnel-1"},
+		"stale tunnel":      {"transaction-1", "tunnel-old"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			joiner := ticketFor("invite-digest", "joiner")
+			if _, err := store.OpenBootstrap(joiner, ObservedEndpoint{}, "apple-agent", values[0], values[1], 4); !errors.Is(err, ErrBootstrapPeer) {
+				t.Fatalf("OpenBootstrap = %v, want ErrBootstrapPeer", err)
+			}
+		})
+	}
+	joiner := ticketFor("invite-digest", "joiner")
+	if _, err := store.OpenBootstrap(joiner, ObservedEndpoint{}, "apple-agent", "transaction-1", "tunnel-1", 3); !errors.Is(err, ErrBootstrapPeer) {
+		t.Fatalf("stale generation = %v, want ErrBootstrapPeer", err)
+	}
+}
+
+func TestBootstrapSessionsRejectUnselectedThirdPeer(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	store := New(testLimits(), fixedClock(t, now))
+	inviter := ticketFor("invite-digest", "selected-agent")
+	joiner := ticketFor("invite-digest", "joiner")
+	if _, err := store.OpenBootstrap(inviter, ObservedEndpoint{}, "selected-agent", "transaction-1", "tunnel-1", 4); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OpenBootstrap(joiner, ObservedEndpoint{}, "selected-agent", "transaction-1", "tunnel-1", 4); err != nil {
+		t.Fatal(err)
+	}
+	unselected := ticketFor("invite-digest", "other-ready-agent")
+	if _, err := store.OpenBootstrap(unselected, ObservedEndpoint{}, "selected-agent", "transaction-1", "tunnel-1", 4); !errors.Is(err, ErrBootstrapPeer) {
+		t.Fatalf("unselected peer = %v, want ErrBootstrapPeer", err)
+	}
+}
+
+func TestBootstrapSessionExpiresAtInvitationBoundary(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	store := New(testLimits(), fixedClock(t, now))
+	ticket := ticketFor("invite-digest", "selected-agent")
+	ticket.ExpiresAt = now.Add(time.Second).Format(time.RFC3339Nano)
+	id, err := store.OpenBootstrap(ticket, ObservedEndpoint{}, "selected-agent", "transaction-1", "tunnel-1", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, _ := store.Session(id)
+	if !opened.ExpiresAt.Equal(now.Add(time.Second)) {
+		t.Fatalf("expiry = %s, want invitation expiry", opened.ExpiresAt)
+	}
+	store.now = func() time.Time { return now.Add(2 * time.Second) }
+	if removed := store.Sweep(); removed != 1 || store.Count() != 0 {
+		t.Fatalf("expired invitation cleanup removed=%d count=%d", removed, store.Count())
+	}
+}
+
+func TestBootstrapCandidateCannotCrossInvitationSession(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	store := New(testLimits(), fixedClock(t, now))
+	id, err := store.OpenBootstrap(ticketFor("invite-a", "selected-agent"), ObservedEndpoint{}, "selected-agent", "transaction-1", "tunnel-1", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := network.Candidate{
+		Version: network.WireVersion, CandidateID: "cross-invitation",
+		SessionID: "invite-b-session", AgentKey: "selected-agent",
+		Kind: "host", Transport: "udp", Address: "192.0.2.1", Port: 51820,
+		ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano),
+	}
+	if err := store.Offer(id, candidate); !errors.Is(err, ErrCandidateBinding) {
+		t.Fatalf("cross-invitation candidate = %v, want ErrCandidateBinding", err)
+	}
+	opened, _ := store.Session(id)
+	if len(opened.Candidates) != 0 {
+		t.Fatalf("cross-invitation candidate stored: %+v", opened.Candidates)
+	}
+}
+
 func TestOfferEnforcesCandidateLimit(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	store := New(testLimits(), fixedClock(t, now))

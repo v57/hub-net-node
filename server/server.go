@@ -22,6 +22,7 @@ import (
 
 	"github.com/v57/hub-net-node/config"
 	"github.com/v57/hub-net-node/health"
+	"github.com/v57/hub-net-node/invitation"
 	"github.com/v57/hub-net-node/limiter"
 	"github.com/v57/hub-net-node/logging"
 	"github.com/v57/hub-net-node/protocol"
@@ -386,6 +387,69 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 
 	switch envelope.Type {
 	case protocol.MessageOpenSession:
+		if envelope.InvitationCode != "" {
+			if state.sessionID != "" {
+				s.writeError(state, "bad_request", "session already open", false)
+				return false
+			}
+			verified, err := invitation.VerifyCode(envelope.InvitationCode, time.Now())
+			if err != nil || invitation.ValidatePeer(verified, envelope.AgentKey) != nil {
+				s.writeError(state, "unauthorized", "invitation rejected", false)
+				return false
+			}
+			if envelope.TokenDigest != verified.TokenDigest {
+				s.writeError(state, "unauthorized", "invitation rejected", false)
+				return false
+			}
+			if verified.BindingKind == "apple-app" {
+				if envelope.TunnelInstance != verified.TunnelInstanceID || envelope.Generation != verified.Generation {
+					s.writeError(state, "unauthorized", "Apple invitation binding rejected", false)
+					return false
+				}
+			} else if envelope.TunnelInstance != "" || envelope.Generation != 0 {
+				s.writeError(state, "unauthorized", "unexpected Apple invitation binding", false)
+				return false
+			}
+			bootstrapTicket := network.RendezvousTicket{
+				Version:      network.WireVersion,
+				TicketID:     verified.TokenDigest + ":" + envelope.AgentKey,
+				HubKey:       verified.HubKey,
+				HubNetworkID: verified.TokenDigest,
+				ProfileKey:   envelope.ProfileKey,
+				AgentKey:     envelope.AgentKey,
+				NodeID:       s.cfg.NodeID,
+				Roles:        []string{"rendezvous"},
+				IssuedAt:     verified.IssuedAt,
+				ExpiresAt:    verified.ExpiresAt,
+			}
+			observed, ok := s.udpObserved.get(bootstrapTicket, time.Now())
+			if !ok {
+				s.writeError(state, "udp_observation_required", "authenticated UDP probe required before session.open", true)
+				return false
+			}
+			expiresAt, _ := time.Parse(time.RFC3339Nano, verified.ExpiresAt)
+			replayKey := verified.TokenDigest + "\x00" + envelope.AgentKey
+			if replayErr := s.replays.Consume(replayKey, state.source, expiresAt); replayErr != nil {
+				s.writeError(state, "replay_detected", "invitation bootstrap replay rejected", false)
+				return false
+			}
+			id, openErr := s.sessions.OpenBootstrap(bootstrapTicket, observed, verified.InvitingAgentKey, envelope.TransactionID, envelope.TunnelInstance, envelope.Generation)
+			if openErr != nil {
+				s.replays.Release(replayKey)
+				s.writeError(state, errorCode(openErr), openErr.Error(), false)
+				return false
+			}
+			state.sessionID = id
+			state.ticket = bootstrapTicket
+			s.reporter.IncrementSessions()
+			s.registerPeer(id, func(reply protocol.Envelope) { s.writeEnvelope(state, reply) })
+			s.writeEnvelope(state, protocol.Envelope{
+				MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
+				Type: protocol.MessageSessionOpened, RequestID: envelope.RequestID, SessionID: id,
+			})
+			s.deliverPeerCandidates(state)
+			return false
+		}
 		rendezvousTicket := *envelope.Ticket
 		if err := s.tickets.Verify(rendezvousTicket); err != nil {
 			s.writeError(state, "unauthorized", "ticket rejected", false)
@@ -590,6 +654,8 @@ func errorCode(err error) string {
 		return "not_matched"
 	case errors.Is(err, session.ErrCandidateBinding), errors.Is(err, session.ErrCandidateExpired):
 		return "bad_request"
+	case errors.Is(err, session.ErrBootstrapPeer):
+		return "invite_already_claimed"
 	default:
 		return "internal_error"
 	}
