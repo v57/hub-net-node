@@ -15,7 +15,7 @@ import (
 
 const (
 	SignatureDomain = "hub-network/invitation/v1"
-	MaxLifetime     = 10 * time.Minute
+	MaxLifetime     = 7 * 24 * time.Hour
 	MaxCodeBytes    = 4096
 )
 
@@ -74,7 +74,8 @@ func VerifyCode(code string, now time.Time) (Verified, error) {
 	}
 	issuedAt, err1 := time.Parse(time.RFC3339Nano, envelope.IssuedAt)
 	expiresAt, err2 := time.Parse(time.RFC3339Nano, envelope.ExpiresAt)
-	if err1 != nil || err2 != nil || expiresAt.Sub(issuedAt) != MaxLifetime ||
+	lifetime := expiresAt.Sub(issuedAt)
+	if err1 != nil || err2 != nil || lifetime <= 0 || lifetime > MaxLifetime ||
 		issuedAt.After(now.Add(30*time.Second)) || !expiresAt.After(now) {
 		return Verified{}, errors.New("invitation expired or has invalid lifetime")
 	}

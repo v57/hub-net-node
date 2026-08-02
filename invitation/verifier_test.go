@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func signedCode(t *testing.T, now time.Time, apple bool) string {
+func signedCode(t *testing.T, now time.Time, lifetime time.Duration, apple bool) string {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -23,7 +23,7 @@ func signedCode(t *testing.T, now time.Time, apple bool) string {
 	value := map[string]any{
 		"version": 1, "signatureDomain": SignatureDomain,
 		"tokenId":  base64.RawURLEncoding.EncodeToString(token),
-		"issuedAt": now.Format(time.RFC3339Nano), "expiresAt": now.Add(MaxLifetime).Format(time.RFC3339Nano),
+		"issuedAt": now.Format(time.RFC3339Nano), "expiresAt": now.Add(lifetime).Format(time.RFC3339Nano),
 		"hubKey":               base64.StdEncoding.EncodeToString(der),
 		"invitingAgentKey":     base64.StdEncoding.EncodeToString(publicKey),
 		"invitingAgentAddress": "100.96.0.2", "hubProHost": "100.96.0.1",
@@ -49,7 +49,7 @@ func signedCode(t *testing.T, now time.Time, apple bool) string {
 
 func TestVerifyCodeAcceptsScopedInvitationAndRejectsTamperExpiryAndOversize(t *testing.T) {
 	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
-	code := signedCode(t, now, false)
+	code := signedCode(t, now, MaxLifetime, false)
 	verified, err := VerifyCode(code, now)
 	if err != nil {
 		t.Fatal(err)
@@ -68,11 +68,17 @@ func TestVerifyCodeAcceptsScopedInvitationAndRejectsTamperExpiryAndOversize(t *t
 	if _, err := VerifyCode(string(make([]byte, MaxCodeBytes+1)), now); err == nil {
 		t.Fatal("oversized invitation accepted")
 	}
+	if _, err := VerifyCode(signedCode(t, now, 10*time.Minute, false), now); err != nil {
+		t.Fatalf("shorter invitation rejected: %v", err)
+	}
+	if _, err := VerifyCode(signedCode(t, now, MaxLifetime+time.Nanosecond, false), now); err == nil {
+		t.Fatal("invitation beyond maximum lifetime accepted")
+	}
 }
 
 func TestVerifyCodeAuthenticatesAppleBindingPins(t *testing.T) {
 	now := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
-	verified, err := VerifyCode(signedCode(t, now, true), now)
+	verified, err := VerifyCode(signedCode(t, now, MaxLifetime, true), now)
 	if err != nil {
 		t.Fatal(err)
 	}
