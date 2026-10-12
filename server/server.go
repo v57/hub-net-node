@@ -457,6 +457,13 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 				return false
 			}
 			s.logger.Info("session.open joiner", "from", state.source, "digest", short(envelope.TokenDigest), "key", short(envelope.Key))
+			// The inviter's own side must come from its registration
+			// connection; holding the code alone does not make a client the
+			// inviter.
+			if envelope.Key == verified.InvitingKey && state.serviceKey != verified.InvitingKey {
+				s.writeError(state, "unauthorized", "inviter side requires its registration connection", false)
+				return false
+			}
 			// An invitation is only accepted when the inviter that signed it is
 			// currently registered online. This gates joins on inviter presence
 			// without the node relaying any application traffic.

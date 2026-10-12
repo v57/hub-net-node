@@ -432,7 +432,11 @@ func TestAppleInvitationSessionPinsAuthorizationAndExchangesCandidates(t *testin
 			TunnelInstanceID: "tunnel-live", Generation: 7,
 		}
 		observed := sendInvitationUDPProbe(t, address, probe)
-		conn := dialClient(t, address)
+		// The inviter opens its side on its registration connection.
+		conn := inviterReg
+		if key != invitingAgent {
+			conn = dialClient(t, address)
+		}
 		sendEnvelope(t, conn, protocol.Envelope{
 			MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
 			InvitationCode: code, Key: key,
@@ -497,7 +501,11 @@ func TestMachineInvitationSessionExchangesEquivalentCandidates(t *testing.T) {
 			TokenDigest: digest, TransactionID: transactionID,
 		}
 		observed := sendInvitationUDPProbe(t, address, probe)
-		conn := dialClient(t, address)
+		// The inviter opens its side on its registration connection.
+		conn := inviterReg
+		if key != invitingAgent {
+			conn = dialClient(t, address)
+		}
 		sendEnvelope(t, conn, protocol.Envelope{
 			MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
 			InvitationCode: code, Key: key,
@@ -550,14 +558,14 @@ func TestAppleInvitationRejectsReplayAndCleansDisconnectedState(t *testing.T) {
 	inviterReg := registerInviter(t, address, invitingAgent, inviterPrivate)
 	defer inviterReg.Close()
 	probe := protocol.InvitationUDPProbe{
-		Version: 1, InvitationCode: code, Key: invitingAgent,
+		Version: 1, InvitationCode: code, Key: "joiner-wireguard-key",
 		TokenDigest: digest, TransactionID: "transaction",
 		TunnelInstanceID: "tunnel-live", Generation: 7,
 	}
 	sendInvitationUDPProbe(t, address, probe)
 	open := protocol.Envelope{
 		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
-		InvitationCode: code, Key: invitingAgent,
+		InvitationCode: code, Key: "joiner-wireguard-key",
 		TokenDigest: digest, TransactionID: "transaction",
 		TunnelInstance: "tunnel-live", Generation: 7,
 	}
@@ -658,7 +666,7 @@ func TestAppleInvitationCloseCancelsSessionState(t *testing.T) {
 	inviterReg := registerInviter(t, address, invitingAgent, inviterPrivate)
 	defer inviterReg.Close()
 	probe := protocol.InvitationUDPProbe{
-		Version: 1, InvitationCode: code, Key: invitingAgent,
+		Version: 1, InvitationCode: code, Key: "joiner-wireguard-key",
 		TokenDigest: digest, TransactionID: "transaction",
 		TunnelInstanceID: "tunnel-live", Generation: 7,
 	}
@@ -667,7 +675,7 @@ func TestAppleInvitationCloseCancelsSessionState(t *testing.T) {
 	defer conn.Close()
 	sendEnvelope(t, conn, protocol.Envelope{
 		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
-		InvitationCode: code, Key: invitingAgent,
+		InvitationCode: code, Key: "joiner-wireguard-key",
 		TokenDigest: digest, TransactionID: "transaction",
 		TunnelInstance: "tunnel-live", Generation: 7,
 	})
@@ -1005,7 +1013,7 @@ func TestJoinAcceptsWhenInviterOnline(t *testing.T) {
 	inviterReg := registerInviter(t, address, invitingAgent, inviterPrivate)
 	defer inviterReg.Close()
 	probe := protocol.InvitationUDPProbe{
-		Version: 1, InvitationCode: code, Key: invitingAgent,
+		Version: 1, InvitationCode: code, Key: "joiner-wireguard-key",
 		TokenDigest: digest, TransactionID: "transaction",
 		TunnelInstanceID: "tunnel-live", Generation: 7,
 	}
@@ -1014,7 +1022,7 @@ func TestJoinAcceptsWhenInviterOnline(t *testing.T) {
 	defer conn.Close()
 	sendEnvelope(t, conn, protocol.Envelope{
 		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
-		InvitationCode: code, Key: invitingAgent,
+		InvitationCode: code, Key: "joiner-wireguard-key",
 		TokenDigest: digest, TransactionID: "transaction",
 		TunnelInstance: "tunnel-live", Generation: 7,
 	})
@@ -1165,5 +1173,29 @@ func TestRegisteredInviterReceivesBootstrapSignalAndJoinsOnSameConnection(t *tes
 	}
 	if !seenJoiner {
 		t.Fatal("inviter never received joiner candidates")
+	}
+}
+
+// Holding the invitation code does not make a client the inviter: the inviter
+// side must come from the inviter's registration connection.
+func TestInviterSideRequiresRegistrationConnection(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	code, digest, invitingAgent, inviterPrivate := signedAppleInvitation(t, time.Now().UTC())
+	inviterReg := registerInviter(t, address, invitingAgent, inviterPrivate)
+	defer inviterReg.Close()
+	sendInvitationUDPProbe(t, address, protocol.InvitationUDPProbe{
+		Version: 1, InvitationCode: code, Key: invitingAgent,
+		TokenDigest: digest, TransactionID: "transaction",
+	})
+	impostor := dialClient(t, address)
+	defer impostor.Close()
+	sendEnvelope(t, impostor, protocol.Envelope{
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
+		InvitationCode: code, Key: invitingAgent,
+		TokenDigest: digest, TransactionID: "transaction",
+	})
+	if rejected := readEnvelope(t, impostor); rejected.Type != protocol.MessageError || rejected.Error.Code != "unauthorized" {
+		t.Fatalf("impostor inviter open = %+v, want unauthorized", rejected)
 	}
 }
