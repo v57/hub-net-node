@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -160,10 +161,11 @@ func (o *udpObservations) decrementSourceLocked(source string) {
 
 func (s *Server) serveUDPObservations(ctxDone <-chan struct{}, conn *net.UDPConn, stopped chan<- struct{}) {
 	defer close(stopped)
+	reply := newReplyConn(conn)
 	buffer := make([]byte, maxUDPProbeBytes+1)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-		n, address, err := conn.ReadFromUDP(buffer)
+		n, address, local, err := reply.read(buffer)
 		if err != nil {
 			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 				select {
@@ -178,17 +180,18 @@ func (s *Server) serveUDPObservations(ctxDone <-chan struct{}, conn *net.UDPConn
 		if n > maxUDPProbeBytes {
 			continue
 		}
-		s.logger.Info("udp datagram received", "from", address.String(), "bytes", n)
 		now := time.Now()
 		// Compact-invitation probes carry no hub ticket; they are recorded
 		// under a digest-scoped observation key and acknowledged with the
 		// canonical ticket id the inviter/joiner clients expect.
 		if key, ticketID, agentKey, expiresAt, ok := s.verifyInvitationUDPProbe(buffer[:n], now); ok {
-			if s.udpObserved.putKey(key, agentKey, address, expiresAt, now) {
+			if !s.udpObserved.putKey(key, agentKey, address, expiresAt, now) {
+				s.logger.Info("invitation probe not recorded", "from", address.String())
+			} else {
 				response, _ := json.Marshal(protocol.UDPProbeResponse{
 					Version: network.WireVersion, TicketID: ticketID,
 				})
-				_, _ = conn.WriteToUDP(response, address)
+				_ = reply.write(response, address, local)
 			}
 			continue
 		}
@@ -203,7 +206,7 @@ func (s *Server) serveUDPObservations(ctxDone <-chan struct{}, conn *net.UDPConn
 		response, _ := json.Marshal(protocol.UDPProbeResponse{
 			Version: network.WireVersion, TicketID: ticket.TicketID,
 		})
-		_, _ = conn.WriteToUDP(response, address)
+		_ = reply.write(response, address, local)
 	}
 }
 
@@ -225,11 +228,24 @@ func (s *Server) verifyInvitationUDPProbe(payload []byte, now time.Time) (key, t
 	var probe protocol.InvitationUDPProbe
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&probe) != nil || probe.Version != network.WireVersion || probe.Key == "" || probe.TransactionID == "" {
+	if err := decoder.Decode(&probe); err != nil {
+		// Not an invitation probe; the caller tries the ticket form next.
+		s.logger.Debug("udp payload is not an invitation probe", "err", err.Error())
+		return "", "", "", time.Time{}, false
+	}
+	if probe.Version != network.WireVersion || probe.Key == "" || probe.TransactionID == "" {
+		s.logger.Info("invitation probe rejected", "err", "missing version, key or transaction id")
 		return "", "", "", time.Time{}, false
 	}
 	verified, err := invitation.VerifyCode(probe.InvitationCode, now)
-	if err != nil || invitation.ValidatePeer(verified, probe.Key) != nil || probe.TokenDigest != verified.TokenDigest {
+	if err == nil {
+		err = invitation.ValidatePeer(verified, probe.Key)
+	}
+	if err == nil && probe.TokenDigest != verified.TokenDigest {
+		err = errors.New("token digest does not match the invitation")
+	}
+	if err != nil {
+		s.logger.Info("invitation probe rejected", "err", err.Error())
 		return "", "", "", time.Time{}, false
 	}
 	expiresAt, _ = time.Parse(time.RFC3339Nano, verified.ExpiresAt)
