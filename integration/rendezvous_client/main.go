@@ -32,8 +32,7 @@ func main() {
 		server       = flag.String("server", "", "rendezvous node host:port")
 		nodeID       = flag.String("node-id", "default", "ticket node binding")
 		networkID    = flag.String("network-id", "hn409-integration", "shared Hub network")
-		profileKey   = flag.String("profile-key", "", "profile binding")
-		agentKey     = flag.String("agent-key", "", "agent binding")
+		key          = flag.String("key", "", "peer identity binding")
 		identityPath = flag.String("identity", "", "shared Hub signing identity")
 		listenPort   = flag.Int("listen-port", 51820, "UDP source port later used by WireGuard")
 		output       = flag.String("output", "", "file receiving delivered peer endpoint")
@@ -50,23 +49,23 @@ func main() {
 	if *initIdentity {
 		return
 	}
-	if *server == "" || *profileKey == "" || *agentKey == "" || *output == "" {
-		fatal(errors.New("-server, -profile-key, -agent-key, and -output are required"))
+	if *server == "" || *key == "" || *output == "" {
+		fatal(errors.New("-server, -key, and -output are required"))
 	}
-	if err := run(hub, *server, *nodeID, *networkID, *profileKey, *agentKey, *listenPort, *output); err != nil {
+	if err := run(hub, *server, *nodeID, *networkID, *key, *listenPort, *output); err != nil {
 		fatal(err)
 	}
 }
 
-func run(hub *identity.Identity, server, nodeID, networkID, profileKey, agentKey string, listenPort int, output string) error {
+func run(hub *identity.Identity, server, nodeID, networkID, key string, listenPort int, output string) error {
 	now := time.Now().UTC()
 	hubKey, err := hub.PublicKeyBase64()
 	if err != nil {
 		return err
 	}
 	ticket := network.RendezvousTicket{
-		Version: network.WireVersion, TicketID: "hn409-" + agentKey + "-" + strconv.FormatInt(now.UnixNano(), 10),
-		HubKey: hubKey, HubNetworkID: networkID, ProfileKey: profileKey, AgentKey: agentKey,
+		Version: network.WireVersion, TicketID: "hn409-" + key + "-" + strconv.FormatInt(now.UnixNano(), 10),
+		HubKey: hubKey, HubNetworkID: networkID, Key: key,
 		NodeID: nodeID, Roles: []string{"rendezvous"}, SessionPurpose: "peer-connect",
 		IssuedAt:  now.Add(-time.Second).Format(time.RFC3339Nano),
 		ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano),
@@ -126,8 +125,8 @@ func run(hub *identity.Identity, server, nodeID, networkID, profileKey, agentKey
 		return fmt.Errorf("session open failed: %+v", opened.Error)
 	}
 	candidate := network.Candidate{
-		Version: network.WireVersion, CandidateID: "host-" + agentKey,
-		SessionID: opened.SessionID, AgentKey: agentKey, Kind: "host", Transport: "udp",
+		Version: network.WireVersion, CandidateID: "host-" + key,
+		SessionID: opened.SessionID, Key: key, Kind: "host", Transport: "udp",
 		Address: "127.0.0.1", Port: uint16(listenPort), Priority: 1,
 		ExpiresAt: time.Now().Add(protocol.DefaultCandidateLifetime).Format(time.RFC3339Nano),
 	}
@@ -150,7 +149,7 @@ func run(hub *identity.Identity, server, nodeID, networkID, profileKey, agentKey
 			continue
 		}
 		observed := envelope.Observed
-		if observed.Transport != "udp" || observed.AgentKey == agentKey || observed.Port == 0 {
+		if observed.Transport != "udp" || observed.Key == key || observed.Port == 0 {
 			return fmt.Errorf("invalid peer observedEndpoint: %+v", observed)
 		}
 		endpoint := net.JoinHostPort(observed.Address, strconv.Itoa(int(observed.Port)))

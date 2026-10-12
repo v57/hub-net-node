@@ -583,12 +583,12 @@ func FuzzReadFrame(f *testing.F) {
 	seeds := [][]byte{
 		append(append([]byte{byte(OpText) | 0x80, 127 | 0x80}, overflow64...), 0x12, 0x34, 0x56, 0x78),
 		append(append([]byte{byte(OpText) | 0x80, 127 | 0x80}, maxIntPlus1...), 0x12, 0x34, 0x56, 0x78),
-		{byte(OpText) | 0x80, 5, 'h', 'e', 'l', 'l', 'o'}, // unmasked
+		{byte(OpText) | 0x80, 5, 'h', 'e', 'l', 'l', 'o'},                   // unmasked
 		{byte(OpText) | 0x80 | 0x40, 1 | 0x80, 0x12, 0x34, 0x56, 0x78, 'A'}, // RSV1
-		{0x03 | 0x80, 0 | 0x80},               // reserved opcode
-		{byte(OpPing), 0 | 0x80},              // fragmented control
-		{byte(OpPing) | 0x80, 200 | 0x80},     // oversized control
-		{byte(OpText) | 0x80, 1 | 0x80, 0x00, 0x00, 0x00, 0x00, 'A'}, // valid masked text
+		{0x03 | 0x80, 0 | 0x80},                                                     // reserved opcode
+		{byte(OpPing), 0 | 0x80},                                                    // fragmented control
+		{byte(OpPing) | 0x80, 200 | 0x80},                                           // oversized control
+		{byte(OpText) | 0x80, 1 | 0x80, 0x00, 0x00, 0x00, 0x00, 'A'},                // valid masked text
 		{byte(OpPing) | 0x80, 4 | 0x80, 0x00, 0x00, 0x00, 0x00, 'p', 'i', 'n', 'g'}, // valid ping
 	}
 	for _, s := range seeds {

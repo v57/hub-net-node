@@ -16,14 +16,14 @@ import (
 )
 
 // Signed builds one valid ticket bound to nodeID, signed by a fresh Hub key.
-// agentKey/profileKey/networkID identify the opener; distinct agents sharing a
+// key/networkID identify the opener; distinct agents sharing a
 // network id are how the node pairs two sessions.
-func Signed(t *testing.T, now time.Time, nodeID, networkID, profileKey, agentKey string) network.RendezvousTicket {
-	return SignedWithID(t, now, nodeID, networkID, profileKey, agentKey, "ticket-"+agentKey)
+func Signed(t *testing.T, now time.Time, nodeID, networkID, key string) network.RendezvousTicket {
+	return SignedWithID(t, now, nodeID, networkID, key, "ticket-"+key)
 }
 
 // SignedWithID builds a valid ticket with an explicit identifier.
-func SignedWithID(t *testing.T, now time.Time, nodeID, networkID, profileKey, agentKey, ticketID string) network.RendezvousTicket {
+func SignedWithID(t *testing.T, now time.Time, nodeID, networkID, key, ticketID string) network.RendezvousTicket {
 	t.Helper()
 	hub, err := identity.Generate()
 	if err != nil {
@@ -38,8 +38,7 @@ func SignedWithID(t *testing.T, now time.Time, nodeID, networkID, profileKey, ag
 		TicketID:       ticketID,
 		HubKey:         hubKey,
 		HubNetworkID:   networkID,
-		ProfileKey:     profileKey,
-		AgentKey:       agentKey,
+		Key:            key,
 		NodeID:         nodeID,
 		Roles:          []string{"rendezvous"},
 		SessionPurpose: "peer-connect",

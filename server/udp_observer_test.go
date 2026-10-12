@@ -8,9 +8,9 @@ import (
 	network "github.com/v57/hub-service-go/protocol"
 )
 
-func observationTicket(hubKey, ticketID, agentKey string) network.RendezvousTicket {
+func observationTicket(hubKey, ticketID, key string) network.RendezvousTicket {
 	return network.RendezvousTicket{
-		HubKey: hubKey, TicketID: ticketID, AgentKey: agentKey,
+		HubKey: hubKey, TicketID: ticketID, Key: key,
 	}
 }
 
@@ -54,7 +54,7 @@ func TestUDPObservationsUseHubScopedTicketID(t *testing.T) {
 		t.Fatal("Hub-scoped observations collided")
 	}
 	got, ok := observations.get(first, now)
-	if !ok || got.AgentKey != "agent-a" || got.Port != 1001 {
+	if !ok || got.Key != "agent-a" || got.Port != 1001 {
 		t.Fatalf("first observation = %+v, %v", got, ok)
 	}
 }

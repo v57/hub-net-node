@@ -34,8 +34,7 @@ func (v Verifier) Verify(ticket network.RendezvousTicket) error {
 		ticket.TicketID == "" ||
 		ticket.HubKey == "" ||
 		ticket.HubNetworkID == "" ||
-		ticket.ProfileKey == "" ||
-		ticket.AgentKey == "" ||
+		ticket.Key == "" ||
 		ticket.NodeID == "" ||
 		ticket.SessionPurpose != "peer-connect" {
 		return ErrInvalid

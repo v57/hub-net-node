@@ -35,8 +35,7 @@ type ObservedEndpoint = protocol.ObservedEndpoint
 type Session struct {
 	ID               string
 	HubNetworkID     string
-	AgentKey         string
-	ProfileKey       string
+	Key              string
 	TransactionID    string
 	TunnelInstanceID string
 	Generation       uint64
@@ -93,7 +92,7 @@ type Store struct {
 
 // OpenBootstrap opens one invitation-scoped session. Exactly two distinct
 // peers may use a token and one of them must be the invitation's bound agent.
-func (s *Store) OpenBootstrap(ticket network.RendezvousTicket, observed protocol.ObservedEndpoint, invitingAgentKey, transactionID, tunnelInstanceID string, generation uint64) (string, error) {
+func (s *Store) OpenBootstrap(ticket network.RendezvousTicket, observed protocol.ObservedEndpoint, invitingKey, transactionID, tunnelInstanceID string, generation uint64) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -106,9 +105,12 @@ func (s *Store) OpenBootstrap(ticket network.RendezvousTicket, observed protocol
 	if len(live) >= 2 {
 		return "", ErrBootstrapPeer
 	}
+	// The first opener may be the inviting agent or the joiner; the invitation
+	// code is the credential and the pair-formation checks below still require
+	// exactly one of the two peers to be the invitation's bound agent.
 	for _, existing := range live {
-		if existing.AgentKey == ticket.AgentKey ||
-			(existing.AgentKey != invitingAgentKey && ticket.AgentKey != invitingAgentKey) ||
+		if existing.Key == ticket.Key ||
+			(existing.Key != invitingKey && ticket.Key != invitingKey) ||
 			existing.TransactionID != transactionID ||
 			existing.TunnelInstanceID != tunnelInstanceID || existing.Generation != generation {
 			return "", ErrBootstrapPeer
@@ -150,13 +152,13 @@ func (s *Store) Open(ticket network.RendezvousTicket, observed protocol.Observed
 }
 
 func (s *Store) openLocked(ticket network.RendezvousTicket, observed protocol.ObservedEndpoint, now time.Time) (string, error) {
-	agent := ticket.AgentKey
+	agent := ticket.Key
 	if agent == "" {
 		return "", errors.New("session: ticket has no agent binding")
 	}
 	count := 0
 	for _, existing := range s.sessions {
-		if existing.AgentKey == agent && !s.expiredLocked(existing, now) {
+		if existing.Key == agent && !s.expiredLocked(existing, now) {
 			count++
 		}
 	}
@@ -171,8 +173,7 @@ func (s *Store) openLocked(ticket network.RendezvousTicket, observed protocol.Ob
 	session := &Session{
 		ID:           id,
 		HubNetworkID: ticket.HubNetworkID,
-		AgentKey:     agent,
-		ProfileKey:   ticket.ProfileKey,
+		Key:          agent,
 		OpenedAt:     now,
 		ExpiresAt:    now.Add(s.limits.SessionLifetime),
 		Observed:     observed,
@@ -181,7 +182,7 @@ func (s *Store) openLocked(ticket network.RendezvousTicket, observed protocol.Ob
 		session.ExpiresAt = ticketExpiresAt
 	}
 	session.Observed.Version = network.WireVersion
-	session.Observed.AgentKey = agent
+	session.Observed.Key = agent
 	// Pair with the first compatible unmatched session in arrival order.
 	for _, existing := range s.sessions {
 		if existing.ID == id || existing.PeerID != "" {
@@ -190,7 +191,7 @@ func (s *Store) openLocked(ticket network.RendezvousTicket, observed protocol.Ob
 		if s.expiredLocked(existing, now) {
 			continue
 		}
-		if existing.HubNetworkID == session.HubNetworkID && existing.AgentKey != session.AgentKey {
+		if existing.HubNetworkID == session.HubNetworkID && existing.Key != session.Key {
 			existing.PeerID = id
 			session.PeerID = existing.ID
 			break
@@ -215,7 +216,7 @@ func (s *Store) Offer(sessionID string, candidate network.Candidate) error {
 	if s.expiredLocked(session, now) {
 		return ErrSessionExpired
 	}
-	if candidate.SessionID != sessionID || candidate.AgentKey != session.AgentKey {
+	if candidate.SessionID != sessionID || candidate.Key != session.Key {
 		return ErrCandidateBinding
 	}
 	// Drop stale candidates before counting so an expired one never silently

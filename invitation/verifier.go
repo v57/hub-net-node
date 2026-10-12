@@ -1,159 +1,116 @@
 package invitation
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
-	"fmt"
+	"net/url"
+	"strings"
 	"time"
 )
 
 const (
 	SignatureDomain = "hub-network/invitation/v1"
-	MaxLifetime     = 7 * 24 * time.Hour
-	MaxCodeBytes    = 4096
+	MaxLifetime     = 8 * 24 * time.Hour
+	MaxCodeBytes    = 1024
+	URLPrefix       = "hub://join/"
 )
 
-type Scope struct {
-	Audience string   `json:"audience"`
-	Actions  []string `json:"actions"`
-}
-
-type Envelope struct {
-	Version              int     `json:"version"`
-	SignatureDomain      string  `json:"signatureDomain"`
-	TokenID              string  `json:"tokenId"`
-	IssuedAt             string  `json:"issuedAt"`
-	ExpiresAt            string  `json:"expiresAt"`
-	HubKey               string  `json:"hubKey"`
-	InvitingAgentKey     string  `json:"invitingAgentKey"`
-	InvitingAgentAddress string  `json:"invitingAgentAddress"`
-	HubProHost           string  `json:"hubProHost"`
-	Node                 string  `json:"node,omitempty"`
-	BindingKind          string  `json:"bindingKind,omitempty"`
-	TunnelInstanceID     string  `json:"tunnelInstanceId,omitempty"`
-	Generation           uint64  `json:"generation,omitempty"`
-	Scopes               []Scope `json:"scopes"`
-	Signature            string  `json:"signature"`
-}
+var ed25519SPKIPrefix = []byte{0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00}
 
 type Verified struct {
-	Envelope
-	TokenDigest string
+	Payload          string
+	Nonce            uint32
+	Expires          uint32
+	ExpiresAt        string
+	IssuedAt         string
+	AgentKey         string
+	InvitingKey      string
+	HubKey           string
+	Endpoint         string
+	TokenDigest      string
+	BindingKind      string
+	TunnelInstanceID string
+	Generation       uint64
 }
 
-func VerifyCode(code string, now time.Time) (Verified, error) {
-	if len(code) == 0 || len(code) > MaxCodeBytes {
+func VerifyCode(input string, now time.Time) (Verified, error) {
+	code := strings.TrimSpace(input)
+	if strings.HasPrefix(code, URLPrefix) {
+		code = strings.TrimPrefix(code, URLPrefix)
+	}
+	if code == "" || len(code) > MaxCodeBytes {
 		return Verified{}, errors.New("invitation size is invalid")
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(code)
-	if err != nil || base64.RawURLEncoding.EncodeToString(raw) != code {
-		return Verified{}, errors.New("invitation is not canonical base64url")
+	slash := strings.LastIndexByte(code, '/')
+	if slash <= 0 || slash == len(code)-1 {
+		return Verified{}, errors.New("invalid invitation format")
 	}
-	var value map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
-		return Verified{}, errors.New("invalid invitation JSON")
-	}
-	canonical, err := json.Marshal(value)
-	if err != nil || !bytes.Equal(canonical, raw) {
-		return Verified{}, errors.New("invitation JSON is not canonical")
-	}
-	var envelope Envelope
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return Verified{}, errors.New("invalid invitation envelope")
-	}
-	if envelope.Version != 1 || envelope.SignatureDomain != SignatureDomain {
+	payload, signaturePart := code[:slash], code[slash+1:]
+	base, rawQuery, _ := strings.Cut(payload, "?")
+	parts := strings.Split(base, ".")
+	if len(parts) != 3 {
 		return Verified{}, errors.New("unsupported invitation version")
 	}
-	issuedAt, err1 := time.Parse(time.RFC3339Nano, envelope.IssuedAt)
-	expiresAt, err2 := time.Parse(time.RFC3339Nano, envelope.ExpiresAt)
-	lifetime := expiresAt.Sub(issuedAt)
-	if err1 != nil || err2 != nil || lifetime <= 0 || lifetime > MaxLifetime ||
-		issuedAt.After(now.Add(30*time.Second)) || !expiresAt.After(now) {
-		return Verified{}, errors.New("invitation expired or has invalid lifetime")
+	agentRaw, err := decodePart(parts[0], ed25519.PublicKeySize)
+	if err != nil {
+		return Verified{}, errors.New("invalid agent key")
 	}
-	if !hasNodeScope(envelope.Scopes) {
-		return Verified{}, errors.New("invitation lacks node bootstrap scope")
+	expiresRaw, err := decodePart(parts[1], 4)
+	if err != nil {
+		return Verified{}, errors.New("invalid expiration")
 	}
-	if envelope.BindingKind != "" && envelope.BindingKind != "machine" && envelope.BindingKind != "apple-app" {
-		return Verified{}, errors.New("invalid invitation binding kind")
+	nonceRaw, err := decodePart(parts[2], 4)
+	if err != nil {
+		return Verified{}, errors.New("invalid nonce")
 	}
-	if envelope.BindingKind == "apple-app" {
-		if envelope.TunnelInstanceID == "" || envelope.Generation == 0 {
-			return Verified{}, errors.New("incomplete Apple invitation binding")
-		}
-	} else if envelope.TunnelInstanceID != "" || envelope.Generation != 0 {
-		return Verified{}, errors.New("unexpected Apple invitation binding")
-	}
-	token, err := base64.RawURLEncoding.DecodeString(envelope.TokenID)
-	if err != nil || len(token) != 32 {
-		return Verified{}, errors.New("invalid invitation token")
-	}
-	signature, err := base64.StdEncoding.DecodeString(envelope.Signature)
+	signature, err := decodePart(signaturePart, ed25519.SignatureSize)
 	if err != nil {
 		return Verified{}, errors.New("invalid invitation signature")
 	}
-	der, err := base64.StdEncoding.DecodeString(envelope.HubKey)
-	if err != nil {
-		return Verified{}, errors.New("invalid Hub key")
-	}
-	key, err := x509.ParsePKIXPublicKey(der)
-	if err != nil {
-		return Verified{}, errors.New("invalid Hub key")
-	}
-	publicKey, ok := key.(ed25519.PublicKey)
-	if !ok {
-		return Verified{}, errors.New("Hub key is not Ed25519")
-	}
-	unsigned := make(map[string]any, len(value))
-	for key, item := range value {
-		if key != "signature" {
-			unsigned[key] = item
-		}
-	}
-	payload, _ := json.Marshal(unsigned)
-	domain := []byte(SignatureDomain)
-	input := make([]byte, 0, len(domain)+5+len(payload))
-	input = append(input, domain...)
-	input = append(input, 0)
-	length := make([]byte, 4)
-	binary.BigEndian.PutUint32(length, uint32(len(payload)))
-	input = append(input, length...)
-	input = append(input, payload...)
-	if !ed25519.Verify(publicKey, input, signature) {
+	if !ed25519.Verify(ed25519.PublicKey(agentRaw), []byte(payload), signature) {
 		return Verified{}, errors.New("invalid invitation signature")
 	}
-	digest := sha256.Sum256(token)
-	return Verified{Envelope: envelope, TokenDigest: base64.RawURLEncoding.EncodeToString(digest[:])}, nil
+	expires := binary.BigEndian.Uint32(expiresRaw)
+	expiresTime := time.Unix(int64(expires), 0).UTC()
+	if !expiresTime.After(now) || expiresTime.After(now.Add(MaxLifetime)) {
+		return Verified{}, errors.New("invitation expired or exceeds maximum lifetime")
+	}
+	endpoint := ""
+	if rawQuery != "" {
+		query, err := url.ParseQuery(rawQuery)
+		if err != nil || len(query) != 1 || len(query["e"]) != 1 || query.Encode() != rawQuery || query.Get("e") == "" {
+			return Verified{}, errors.New("invalid invitation query")
+		}
+		endpoint = query.Get("e")
+	}
+	digest := sha256.Sum256([]byte(payload))
+	spki := append(append([]byte{}, ed25519SPKIPrefix...), agentRaw...)
+	agentKey := base64.StdEncoding.EncodeToString(spki)
+	return Verified{
+		Payload: payload, Nonce: binary.BigEndian.Uint32(nonceRaw), Expires: expires,
+		ExpiresAt: expiresTime.Format(time.RFC3339), IssuedAt: now.UTC().Format(time.RFC3339),
+		AgentKey: agentKey, InvitingKey: agentKey, HubKey: agentKey, Endpoint: endpoint,
+		TokenDigest: base64.RawURLEncoding.EncodeToString(digest[:]),
+	}, nil
 }
 
-func ValidatePeer(invite Verified, agentKey string) error {
-	if agentKey == "" {
+func ValidatePeer(invite Verified, key string) error {
+	if key == "" {
 		return errors.New("bootstrap agent key required")
-	}
-	if agentKey == invite.HubKey {
-		return fmt.Errorf("Hub key cannot be bootstrap peer")
 	}
 	return nil
 }
 
-func hasNodeScope(scopes []Scope) bool {
-	for _, scope := range scopes {
-		if scope.Audience != "node" {
-			continue
-		}
-		for _, action := range scope.Actions {
-			if action == "bootstrap-rendezvous" {
-				return true
-			}
-		}
+func decodePart(value string, size int) ([]byte, error) {
+	if value == "" || strings.Contains(value, "=") {
+		return nil, errors.New("non-canonical base64url")
 	}
-	return false
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(decoded) != size || base64.RawURLEncoding.EncodeToString(decoded) != value {
+		return nil, errors.New("non-canonical base64url")
+	}
+	return decoded, nil
 }

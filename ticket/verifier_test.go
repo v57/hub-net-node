@@ -25,8 +25,8 @@ func TestVerifierRejectsMutationsAndInvalidLifetime(t *testing.T) {
 		name   string
 		mutate func(*network.RendezvousTicket)
 	}{
-		{"profile binding", func(ticket *network.RendezvousTicket) { ticket.ProfileKey = "substituted" }},
-		{"agent binding", func(ticket *network.RendezvousTicket) { ticket.AgentKey = "substituted" }},
+		{"profile binding", func(ticket *network.RendezvousTicket) { ticket.Key = "substituted" }},
+		{"agent binding", func(ticket *network.RendezvousTicket) { ticket.Key = "substituted" }},
 		{"network binding", func(ticket *network.RendezvousTicket) { ticket.HubNetworkID = "substituted" }},
 		{"node binding", func(ticket *network.RendezvousTicket) { ticket.NodeID = "other-node" }},
 		{"purpose", func(ticket *network.RendezvousTicket) { ticket.SessionPurpose = "relay" }},
@@ -71,7 +71,7 @@ func TestInvalidSignatureNeverAllocatesReplayState(t *testing.T) {
 	verifier := Verifier{NodeID: "node-public-1", Now: func() time.Time { return now }}
 	cache := NewReplayCache(1, 1, func() time.Time { return now })
 	value := signedTicket(t, now)
-	value.AgentKey = "signature-tampered"
+	value.Key = "signature-tampered"
 	if err := verifier.Verify(value); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Verify error = %v, want ErrInvalid", err)
 	}
@@ -95,8 +95,7 @@ func signedTicket(t *testing.T, now time.Time) network.RendezvousTicket {
 		TicketID:       "ticket-1",
 		HubKey:         hubKey,
 		HubNetworkID:   "network-1",
-		ProfileKey:     "profile-1",
-		AgentKey:       "agent-1",
+		Key:            "agent-1",
 		NodeID:         "node-public-1",
 		Roles:          []string{"rendezvous"},
 		SessionPurpose: "peer-connect",

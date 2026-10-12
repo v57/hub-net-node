@@ -10,6 +10,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"strings"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/v57/hub-net-node/limiter"
 	"github.com/v57/hub-net-node/logging"
 	"github.com/v57/hub-net-node/protocol"
+	"github.com/v57/hub-net-node/registry"
 	"github.com/v57/hub-net-node/session"
 	"github.com/v57/hub-net-node/ticket"
 	"github.com/v57/hub-net-node/transport/ws"
@@ -37,6 +39,11 @@ const RendezvousPath = "/rendezvous"
 
 // HealthPath is the HTTP health endpoint.
 const HealthPath = "/healthz"
+
+// singleUseReplaySuffix marks the global per-invitation join slot. The slot
+// key is the exact SHA-256(payload) replay digest plus this suffix; the
+// inviter's own paired open is exempt and uses only the per-peer slot.
+const singleUseReplaySuffix = "\x00join"
 
 // Options configures the rendezvous server.
 type Options struct {
@@ -57,6 +64,7 @@ type Server struct {
 	replays      *ticket.ReplayCache
 	sessions     *session.Store
 	udpObserved  *udpObservations
+	registry     *registry.Registry
 	httpServer   *http.Server
 
 	// peers maps a live session id to its connection's writer, so candidate
@@ -98,6 +106,7 @@ func New(options Options) (*Server, error) {
 		replays:       ticket.NewReplayCache(ticket.DefaultReplayCapacity, ticket.DefaultReplayPerSource, nil),
 		sessions:      sessions,
 		udpObserved:   newUDPObservations(),
+		registry:      registry.New(registry.Options{}),
 		peers:         make(map[string]func(protocol.Envelope)),
 		listenAddress: cfg.ListenAddress,
 		shutdownCh:    make(chan struct{}),
@@ -280,6 +289,7 @@ func (s *Server) runSweepLoop(ctx context.Context, stopped chan struct{}) {
 			removed := s.sessions.Sweep()
 			s.replays.Sweep()
 			s.udpObserved.sweep(time.Now())
+			s.registry.Sweep()
 			for i := 0; i < removed; i++ {
 				s.reporter.DecrementSessions()
 			}
@@ -340,6 +350,9 @@ func (s *Server) serveRendezvous(ctx context.Context, state *connState) {
 			s.sessions.Close(state.sessionID)
 			s.reporter.DecrementSessions()
 		}
+		if state.serviceKey != "" {
+			s.registry.Disconnect(state.serviceKey)
+		}
 	}()
 
 	for {
@@ -386,6 +399,42 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 	}
 
 	switch envelope.Type {
+	case protocol.MessageRegisterInviter:
+		if state.sessionID != "" {
+			s.writeError(state, "bad_request", "session open on registering connection", false)
+			return false
+		}
+		// A request with no signature asks the node for a challenge; a request
+		// with a signature answers one. Validate already guaranteed nonce and
+		// signature arrive together or both absent.
+		if envelope.ChallengeSignature == "" {
+			nonce, err := s.registry.Challenge(envelope.ServiceKey)
+			if err != nil {
+				s.writeError(state, errorCode(err), err.Error(), false)
+				return false
+			}
+			s.writeEnvelope(state, protocol.Envelope{
+				MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
+				Type: protocol.MessageInviterChallenge, RequestID: envelope.RequestID,
+				ServiceKey: envelope.ServiceKey, ChallengeNonce: nonce,
+			})
+			return false
+		}
+		expiry, err := s.registry.Verify(envelope.ServiceKey, envelope.ChallengeSignature)
+		if err != nil {
+			s.writeError(state, errorCode(err), err.Error(), false)
+			return false
+		}
+		state.serviceKey = envelope.ServiceKey
+		// Bind a write callback so the node can notify this connection if the
+		// registration is later superseded or expired by sweep.
+		s.registry.Bind(envelope.ServiceKey, func(reply protocol.Envelope) { s.writeEnvelope(state, reply) })
+		s.writeEnvelope(state, protocol.Envelope{
+			MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
+			Type: protocol.MessageInviterRegistered, RequestID: envelope.RequestID,
+			ServiceKey: envelope.ServiceKey, RegistrationExpiresAt: expiry.UTC().Format(time.RFC3339Nano),
+		})
+		return false
 	case protocol.MessageOpenSession:
 		if envelope.InvitationCode != "" {
 			if state.sessionID != "" {
@@ -393,7 +442,7 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 				return false
 			}
 			verified, err := invitation.VerifyCode(envelope.InvitationCode, time.Now())
-			if err != nil || invitation.ValidatePeer(verified, envelope.AgentKey) != nil {
+			if err != nil || invitation.ValidatePeer(verified, envelope.Key) != nil {
 				s.writeError(state, "unauthorized", "invitation rejected", false)
 				return false
 			}
@@ -401,44 +450,88 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 				s.writeError(state, "unauthorized", "invitation rejected", false)
 				return false
 			}
-			if verified.BindingKind == "apple-app" {
-				if envelope.TunnelInstance != verified.TunnelInstanceID || envelope.Generation != verified.Generation {
-					s.writeError(state, "unauthorized", "Apple invitation binding rejected", false)
-					return false
-				}
-			} else if envelope.TunnelInstance != "" || envelope.Generation != 0 {
-				s.writeError(state, "unauthorized", "unexpected Apple invitation binding", false)
+			s.logger.Info("session.open joiner", "from", state.source, "digest", short(envelope.TokenDigest), "key", short(envelope.Key))
+			// An invitation is only accepted when the inviter that signed it is
+			// currently registered online. This gates joins on inviter presence
+			// without the node relaying any application traffic.
+			if !s.registry.Online(verified.InvitingKey) {
+				s.writeError(state, "unauthorized", "inviter offline", false)
 				return false
 			}
 			bootstrapTicket := network.RendezvousTicket{
 				Version:      network.WireVersion,
-				TicketID:     verified.TokenDigest + ":" + envelope.AgentKey,
+				TicketID:     verified.TokenDigest + ":" + envelope.Key,
 				HubKey:       verified.HubKey,
 				HubNetworkID: verified.TokenDigest,
-				ProfileKey:   envelope.ProfileKey,
-				AgentKey:     envelope.AgentKey,
+				Key:          envelope.Key,
 				NodeID:       s.cfg.NodeID,
 				Roles:        []string{"rendezvous"},
 				IssuedAt:     verified.IssuedAt,
 				ExpiresAt:    verified.ExpiresAt,
 			}
-			observed, ok := s.udpObserved.get(bootstrapTicket, time.Now())
+			observed, ok := s.udpObserved.getKey(
+				invitationObservationKey(verified.TokenDigest, envelope.Key),
+				envelope.Key,
+				time.Now(),
+			)
+			s.logger.Info("session.open observation", "from", state.source, "ok", ok)
 			if !ok {
 				s.writeError(state, "udp_observation_required", "authenticated UDP probe required before session.open", true)
 				return false
 			}
 			expiresAt, _ := time.Parse(time.RFC3339Nano, verified.ExpiresAt)
-			replayKey := verified.TokenDigest + "\x00" + envelope.AgentKey
+			replayKey := verified.TokenDigest + "\x00" + envelope.Key
 			if replayErr := s.replays.Consume(replayKey, state.source, expiresAt); replayErr != nil {
 				s.writeError(state, "replay_detected", "invitation bootstrap replay rejected", false)
 				return false
 			}
-			id, openErr := s.sessions.OpenBootstrap(bootstrapTicket, observed, verified.InvitingAgentKey, envelope.TransactionID, envelope.TunnelInstance, envelope.Generation)
+			// Single-use: the joiner's open additionally consumes a global
+			// slot keyed on the exact payload digest, so one invitation can
+			// never create a second join even after the paired sessions
+			// close. The inviter opening its own side of the same session is
+			// not a new join and must not consume that slot.
+			singleUseKey := ""
+			if envelope.Key != verified.InvitingKey {
+				singleUseKey = verified.TokenDigest + singleUseReplaySuffix
+				if replayErr := s.replays.Consume(singleUseKey, state.source, expiresAt); replayErr != nil {
+					s.replays.Release(replayKey)
+					s.writeError(state, "replay_detected", "invitation bootstrap replay rejected", false)
+					return false
+				}
+			}
+			// Signal the online inviter before opening the joiner session so
+			// it can join its side on the registration connection. Only a
+			// joiner's open triggers the signal; the inviter opening its own
+			// side (possibly on that same connection) must not self-signal.
+			// A registration that drops between the online check and this
+			// push rejects the join instead of stranding an unpaired session.
+			if envelope.Key != verified.InvitingKey {
+				if !s.registry.Push(verified.InvitingKey, protocol.Envelope{
+					MajorVersion:   protocol.MajorVersion,
+					MinorVersion:   protocol.MinorVersion,
+					Type:           protocol.MessageBootstrapPending,
+					InvitationCode: envelope.InvitationCode,
+					Key:            envelope.Key,
+					TokenDigest:    envelope.TokenDigest,
+					TransactionID:  envelope.TransactionID,
+					TunnelInstance: envelope.TunnelInstance,
+					Generation:     envelope.Generation,
+				}) {
+					s.replays.Release(singleUseKey)
+					s.replays.Release(replayKey)
+					s.writeError(state, "unauthorized", "inviter offline", false)
+					return false
+				}
+				s.logger.Info("push bootstrap pending", "to", short(verified.InvitingKey), "digest", short(envelope.TokenDigest))
+			}
+			id, openErr := s.sessions.OpenBootstrap(bootstrapTicket, observed, verified.InvitingKey, envelope.TransactionID, envelope.TunnelInstance, envelope.Generation)
 			if openErr != nil {
+				s.replays.Release(singleUseKey)
 				s.replays.Release(replayKey)
 				s.writeError(state, errorCode(openErr), openErr.Error(), false)
 				return false
 			}
+			s.logger.Info("session opened joiner", "session", id)
 			state.sessionID = id
 			state.ticket = bootstrapTicket
 			s.reporter.IncrementSessions()
@@ -448,6 +541,10 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 				Type: protocol.MessageSessionOpened, RequestID: envelope.RequestID, SessionID: id,
 			})
 			s.deliverPeerCandidates(state)
+			// If the inviter already opened its side, push this joiner's
+			// candidates and observed endpoint to it so both peers learn the
+			// match without waiting for an offer.
+			s.pushToPeer(id)
 			return false
 		}
 		rendezvousTicket := *envelope.Ticket
@@ -460,6 +557,7 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			return false
 		}
 		observed, ok := s.udpObserved.get(rendezvousTicket, time.Now())
+		s.logger.Info("session.open ticket", "from", state.source, "ticket", short(rendezvousTicket.TicketID), "observed", ok)
 		if !ok {
 			s.writeError(state, "udp_observation_required", "authenticated UDP probe required before session.open", true)
 			return false
@@ -502,6 +600,9 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 		})
 		// If a peer was already waiting, deliver its candidates now.
 		s.deliverPeerCandidates(state)
+		// Deliver this opener's candidates and observed endpoint to the
+		// waiting peer as well, so the match is symmetric.
+		s.pushToPeer(id)
 		return false
 
 	case protocol.MessageOfferCandidate:
@@ -510,6 +611,7 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			return false
 		}
 		candidate := *envelope.Candidate
+		s.logger.Info("offer candidate", "session", state.sessionID, "from", state.source, "candidate", candidate.Address)
 		if err := s.sessions.Offer(state.sessionID, candidate); err != nil {
 			retryable := !errors.Is(err, session.ErrCandidateExpired)
 			s.writeError(state, errorCode(err), err.Error(), retryable)
@@ -526,6 +628,13 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			s.sessions.Close(state.sessionID)
 			s.reporter.DecrementSessions()
 			state.sessionID = ""
+		}
+		// A registered online inviter multiplexes transient bootstrap sessions
+		// with its registration lease on one connection. Closing a bootstrap
+		// session must not tear down the registration; only the session is
+		// released. Plain rendezvous connections keep the terminal close.
+		if state.serviceKey != "" {
+			return false
 		}
 		return true
 
@@ -555,10 +664,11 @@ func (s *Server) deliverPeerCandidates(state *connState) {
 		Observed:     &observed,
 	}
 	s.writeEnvelope(state, envelope)
-	s.logger.Debug("delivered candidates",
+	s.logger.Info("delivered candidates",
 		slog.String("session", state.sessionID),
 		slog.Int("candidates", len(candidates)),
 		slog.String("peerObserved", observed.Address),
+		slog.String("candidateList", candidatesString(candidates)),
 	)
 }
 
@@ -590,11 +700,12 @@ func (s *Server) pushToPeer(sessionID string) {
 	}
 	// Log observed endpoint so operators can confirm the node reports transport
 	// source distinct from client-declared candidates.
-	s.logger.Debug("pushed candidates to peer",
+	s.logger.Info("pushed candidates to peer",
 		slog.String("session", sessionID),
 		slog.String("peer", state.PeerID),
 		slog.Int("candidates", len(candidates)),
 		slog.String("peerObserved", observed.Address),
+		slog.String("candidateList", candidatesString(candidates)),
 	)
 }
 
@@ -641,6 +752,22 @@ func (s *Server) writeEnvelope(state *connState, envelope protocol.Envelope) {
 	_ = state.conn.WriteMessage(body)
 }
 
+// short abbreviates a long key/digest for log lines.
+func short(v string) string {
+	if len(v) <= 12 {
+		return v
+	}
+	return v[:12]
+}
+
+func candidatesString(candidates []network.Candidate) string {
+	parts := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		parts = append(parts, c.Address)
+	}
+	return strings.Join(parts, ",")
+}
+
 // errorCode maps a session-store error to its wire-shaped NetworkError code.
 func errorCode(err error) string {
 	switch {
@@ -656,6 +783,12 @@ func errorCode(err error) string {
 		return "bad_request"
 	case errors.Is(err, session.ErrBootstrapPeer):
 		return "invite_already_claimed"
+	case errors.Is(err, registry.ErrMalformedServiceKey), errors.Is(err, registry.ErrUnknownChallenge):
+		return "unauthorized"
+	case errors.Is(err, registry.ErrInvalidSignature):
+		return "unauthorized"
+	case errors.Is(err, registry.ErrCapacityExceeded):
+		return "capacity_exceeded"
 	default:
 		return "internal_error"
 	}
@@ -663,12 +796,13 @@ func errorCode(err error) string {
 
 // connState is the per-connection rendezvous state owned by serveRendezvous.
 type connState struct {
-	conn      *ws.Conn
-	writeMu   sync.Mutex
-	limiter   *limiter.RateLimiter
-	sessionID string
-	ticket    network.RendezvousTicket
-	source    string
+	conn       *ws.Conn
+	writeMu    sync.Mutex
+	limiter    *limiter.RateLimiter
+	sessionID  string
+	ticket     network.RendezvousTicket
+	source     string
+	serviceKey string
 }
 
 func remoteSourceIP(remoteAddress string) string {

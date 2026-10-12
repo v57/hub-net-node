@@ -13,8 +13,9 @@ and must ignore unknown optional fields. Initial limits are:
 - 16 candidates per session;
 - 16 KiB per coordination message;
 - 20 messages per second per connection;
-- two-minute session lifetime; and
-- 30-second candidate lifetime.
+- two-minute session lifetime;
+- 30-second candidate lifetime; and
+- two-minute online inviter registration lease.
 
 Operators may lower limits. Raising them is a deployment choice but does not
 change the protocol.
@@ -37,9 +38,67 @@ change the protocol.
    its ticket identity and session and expires after the advertised lifetime.
 6. The node returns `candidate.list` coordination data to the matched peer.
    `observedEndpoint` contains the node-measured UDP mapping, is bound to the
-   peer `agentKey`, and remains distinct from declared candidates.
+   peer `key`, and remains distinct from declared candidates.
 7. Either agent may send `session.close`; otherwise expiry removes the session
    and retained endpoints.
+
+## Online inviter registry
+
+An agent that can issue compact invitations registers itself so joins are routed
+to a currently present inviter. Registration is keyed by the agent's service
+public key (the base64 SPKI Ed25519 key that signs its invitations) and proves
+possession of the matching private key through a signed challenge.
+
+1. The agent opens a WebSocket to the rendezvous endpoint and sends
+   `inviter.register` carrying only its `serviceKey`. The node replies
+   `inviter.challenge` with a random `challengeNonce` (16 bytes, unpadded
+   base64url).
+2. The agent signs the raw nonce bytes under the
+   `hub-network/inviter-registration/v1` domain and resends `inviter.register`
+   with `serviceKey`, `challengeNonce`, and `challengeSignature`.
+3. The node verifies the signature against the raw 32-byte service public key.
+   On success it replies `inviter.registered` with a `registrationExpiresAt`
+   lease (two minutes by default). The nonce is single-use: it cannot be replayed.
+4. While the connection stays open and the lease is live, the inviter is
+   considered online. Disconnect or lease expiry drops the registration; the
+   agent re-runs the challenge to re-register.
+
+A joiner's `session.open` carrying an invitation is rejected with a
+non-retryable `unauthorized` (`inviter offline`) unless the invitation's signing
+key is currently registered. This routes joins to a live inviter without the
+node relaying any application traffic; the no-payload invariant still holds.
+
+Registration state is in-memory and process-local; a node restart clears it and
+inviters re-register. A registration lease is swept on the same cadence as
+sessions and UDP observations.
+
+## Invitation bootstrap signaling
+
+The joiner opens its invitation session first in the client-initiated flow.
+After the node verifies the compact invitation, confirms the signing inviter is
+online, consumes the joiner's replay entry, and opens the joiner session, it
+pushes `inviter.bootstrap` to the registered inviter's connection:
+
+- `invitationCode` (the compact code the joiner presented, so the inviter can
+  probe and open its own side without retaining invitation state);
+- `key` (the joiner's service public key);
+- `tokenDigest`, `transactionId`, `tunnelInstanceId`, and `generation` (the
+  exact transaction identity the joiner used).
+
+The inviter then runs the same authenticated UDP probe and `session.open`
+(invitation form) on its registration connection, offering its declared
+`candidate.offer` messages. The node pairs the two sessions in either arrival
+order: the first opener may be the inviter or the joiner, and the second must
+complete the exact (inviter, joiner) pair for the invitation (same token digest,
+transaction, tunnel instance, and generation; a third peer is rejected). When
+the second session opens, the node delivers each peer's candidates and observed
+endpoint to the other immediately, so both sides learn the match without
+waiting for an offer.
+
+The inviter's own `session.open` for an invitation never triggers a second
+`inviter.bootstrap` push (the signal is joiner-opened only). The node relays
+coordination data only; the direct bootstrap request/response exchange happens
+between the joiner and the inviter outside this connection.
 
 ## Ticket replay state
 

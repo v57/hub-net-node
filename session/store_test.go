@@ -19,13 +19,12 @@ func fixedClock(t *testing.T, now time.Time) func() time.Time {
 	return func() time.Time { return now }
 }
 
-func ticketFor(networkID, agentKey string) network.RendezvousTicket {
+func ticketFor(networkID, key string) network.RendezvousTicket {
 	return network.RendezvousTicket{
 		Version:        network.WireVersion,
-		TicketID:       "ticket-" + agentKey,
+		TicketID:       "ticket-" + key,
 		HubNetworkID:   networkID,
-		ProfileKey:     "profile-" + agentKey,
-		AgentKey:       agentKey,
+		Key:            key,
 		NodeID:         "node-1",
 		Roles:          []string{"rendezvous"},
 		SessionPurpose: "peer-connect",
@@ -128,6 +127,40 @@ func TestBootstrapSessionsRejectUnselectedThirdPeer(t *testing.T) {
 	}
 }
 
+func TestBootstrapSessionsAcceptJoinerFirstOrdering(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	store := New(testLimits(), fixedClock(t, now))
+
+	// The joiner opens first in the client-initiated flow; the inviting agent
+	// opens its side after the node signals it over the registration
+	// connection. The pair must still be exactly (joiner, inviter).
+	joiner := ticketFor("invite-digest", "joiner")
+	joinerID, err := store.OpenBootstrap(joiner, ObservedEndpoint{Address: "10.0.0.9"}, "selected-agent", "transaction-1", "tunnel-1", 4)
+	if err != nil {
+		t.Fatalf("joiner-first OpenBootstrap: %v", err)
+	}
+	if _, _, err := store.List(joinerID); !errors.Is(err, ErrNotMatched) {
+		t.Fatalf("List before inviter = %v, want ErrNotMatched", err)
+	}
+
+	inviter := ticketFor("invite-digest", "selected-agent")
+	inviterID, err := store.OpenBootstrap(inviter, ObservedEndpoint{Address: "10.0.0.1"}, "selected-agent", "transaction-1", "tunnel-1", 4)
+	if err != nil {
+		t.Fatalf("inviter second OpenBootstrap: %v", err)
+	}
+	s1, _ := store.Session(joinerID)
+	s2, _ := store.Session(inviterID)
+	if s1.PeerID != inviterID || s2.PeerID != joinerID {
+		t.Fatalf("joiner-first pair failed: joiner.Peer=%q inviter.Peer=%q", s1.PeerID, s2.PeerID)
+	}
+
+	// A third peer (a second joiner) must still be rejected.
+	secondJoiner := ticketFor("invite-digest", "other-joiner")
+	if _, err := store.OpenBootstrap(secondJoiner, ObservedEndpoint{}, "selected-agent", "transaction-1", "tunnel-1", 4); !errors.Is(err, ErrBootstrapPeer) {
+		t.Fatalf("second joiner = %v, want ErrBootstrapPeer", err)
+	}
+}
+
 func TestBootstrapSessionExpiresAtInvitationBoundary(t *testing.T) {
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	store := New(testLimits(), fixedClock(t, now))
@@ -156,7 +189,7 @@ func TestBootstrapCandidateCannotCrossInvitationSession(t *testing.T) {
 	}
 	candidate := network.Candidate{
 		Version: network.WireVersion, CandidateID: "cross-invitation",
-		SessionID: "invite-b-session", AgentKey: "selected-agent",
+		SessionID: "invite-b-session", Key: "selected-agent",
 		Kind: "host", Transport: "udp", Address: "192.0.2.1", Port: 51820,
 		ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano),
 	}
@@ -182,7 +215,7 @@ func TestOfferEnforcesCandidateLimit(t *testing.T) {
 			Version:     network.WireVersion,
 			CandidateID: "cand-" + string(rune('a'+i)),
 			SessionID:   id1,
-			AgentKey:    "agent-1",
+			Key:         "agent-1",
 			Kind:        "host",
 			Transport:   "udp",
 			Address:     "192.0.2.1",
@@ -198,7 +231,7 @@ func TestOfferEnforcesCandidateLimit(t *testing.T) {
 		Version:     network.WireVersion,
 		CandidateID: "cand-overflow",
 		SessionID:   id1,
-		AgentKey:    "agent-1",
+		Key:         "agent-1",
 		Kind:        "host",
 		Transport:   "udp",
 		Address:     "192.0.2.1",
@@ -230,7 +263,7 @@ func TestOfferRejectsBindingMismatch(t *testing.T) {
 	// Candidate claims a different session id.
 	cross := network.Candidate{
 		Version: network.WireVersion, CandidateID: "cand-cross",
-		SessionID: "someone-else", AgentKey: "agent-1",
+		SessionID: "someone-else", Key: "agent-1",
 		Kind: "host", Transport: "udp", Address: "192.0.2.9", Port: 5000,
 		ExpiresAt: now.Add(protocol.DefaultCandidateLifetime).Format(time.RFC3339Nano),
 	}
@@ -246,7 +279,7 @@ func TestOfferRejectsExpiredCandidate(t *testing.T) {
 
 	stale := network.Candidate{
 		Version: network.WireVersion, CandidateID: "cand-stale",
-		SessionID: id1, AgentKey: "agent-1",
+		SessionID: id1, Key: "agent-1",
 		Kind: "host", Transport: "udp", Address: "192.0.2.9", Port: 5000,
 		ExpiresAt: now.Add(-time.Second).Format(time.RFC3339Nano),
 	}
@@ -280,7 +313,7 @@ func TestSweepExpiresSessionsAndCandidates(t *testing.T) {
 	// Offer a candidate that expires before the session does.
 	shortCandidate := network.Candidate{
 		Version: network.WireVersion, CandidateID: "cand-short",
-		SessionID: id1, AgentKey: "agent-1",
+		SessionID: id1, Key: "agent-1",
 		Kind: "host", Transport: "udp", Address: "192.0.2.1", Port: 5000,
 		ExpiresAt: now.Add(10 * time.Second).Format(time.RFC3339Nano),
 	}
@@ -334,7 +367,7 @@ func TestListReturnsCopyNotAlias(t *testing.T) {
 	id2, _ := store.Open(ticketFor("net-1", "agent-2"), ObservedEndpoint{})
 	candidate := network.Candidate{
 		Version: network.WireVersion, CandidateID: "cand-1",
-		SessionID: id1, AgentKey: "agent-1",
+		SessionID: id1, Key: "agent-1",
 		Kind: "host", Transport: "udp", Address: "192.0.2.1", Port: 5000,
 		ExpiresAt: now.Add(protocol.DefaultCandidateLifetime).Format(time.RFC3339Nano),
 	}
