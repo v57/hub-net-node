@@ -4,8 +4,9 @@ services:
   node:
     image: hub-net-node:${HUB_NET_NODE_VERSION:-dev}
     build:
-      context: .
-      dockerfile: Dockerfile
+      # The module replaces ../hub-service-go, so build from the parent folder.
+      context: ..
+      dockerfile: hub-net-node/Dockerfile
       args:
         VERSION: ${HUB_NET_NODE_VERSION:-dev}
     command:

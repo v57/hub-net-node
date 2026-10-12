@@ -1,6 +1,10 @@
-FROM golang:1.25-alpine AS build
+# Build from the directory that holds hub-net-node and the hub-service-go it
+# replaces:  docker build -f hub-net-node/Dockerfile -t hub-net-node .
+FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY . /src/hub-net-node
+COPY channel-go /src/channel-go
+COPY hub-service-go /src/hub-service-go
+COPY hub-net-node /src/hub-net-node
 WORKDIR /src/hub-net-node
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath \

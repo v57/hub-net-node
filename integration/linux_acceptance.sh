@@ -74,7 +74,7 @@ docker run -d --name "$standalone_name" \
 wait_healthy "$standalone_name"
 assert_clean_sigterm "$standalone_name"
 
-docker build --build-arg VERSION="$version" -t "$image" "$root_dir" >/dev/null
+docker build --build-arg VERSION="$version" -t "$image" -f "$root_dir/Dockerfile" "$root_dir/.." >/dev/null
 docker run -d --name "$container_name" "$image" \
   -node-id acceptance-container >/dev/null
 wait_healthy "$container_name"
