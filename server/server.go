@@ -351,7 +351,7 @@ func (s *Server) serveRendezvous(ctx context.Context, state *connState) {
 			s.reporter.DecrementSessions()
 		}
 		if state.serviceKey != "" {
-			s.registry.Disconnect(state.serviceKey)
+			s.registry.Disconnect(state.serviceKey, state)
 		}
 	}()
 
@@ -408,27 +408,33 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 		// with a signature answers one. Validate already guaranteed nonce and
 		// signature arrive together or both absent.
 		if envelope.ChallengeSignature == "" {
-			nonce, err := s.registry.Challenge(envelope.ServiceKey)
+			challenge, err := s.registry.NewChallenge()
 			if err != nil {
 				s.writeError(state, errorCode(err), err.Error(), false)
 				return false
 			}
+			state.challenge = challenge
 			s.writeEnvelope(state, protocol.Envelope{
 				MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
 				Type: protocol.MessageInviterChallenge, RequestID: envelope.RequestID,
-				ServiceKey: envelope.ServiceKey, ChallengeNonce: nonce,
+				ServiceKey: envelope.ServiceKey, ChallengeNonce: challenge.Nonce,
 			})
 			return false
 		}
-		expiry, err := s.registry.Verify(envelope.ServiceKey, envelope.ChallengeSignature)
+		challenge := state.challenge
+		state.challenge = registry.Challenge{} // single use
+		expiry, err := s.registry.Register(envelope.ServiceKey, challenge, envelope.ChallengeSignature, state)
 		if err != nil {
 			s.writeError(state, errorCode(err), err.Error(), false)
 			return false
 		}
+		if state.serviceKey != "" && state.serviceKey != envelope.ServiceKey {
+			s.registry.Disconnect(state.serviceKey, state)
+		}
 		state.serviceKey = envelope.ServiceKey
-		// Bind a write callback so the node can notify this connection if the
-		// registration is later superseded or expired by sweep.
-		s.registry.Bind(envelope.ServiceKey, func(reply protocol.Envelope) { s.writeEnvelope(state, reply) })
+		// Bind a write callback so the node can push bootstrap requests to
+		// this connection.
+		s.registry.Bind(envelope.ServiceKey, state, func(reply protocol.Envelope) { s.writeEnvelope(state, reply) })
 		s.writeEnvelope(state, protocol.Envelope{
 			MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
 			Type: protocol.MessageInviterRegistered, RequestID: envelope.RequestID,
@@ -803,6 +809,8 @@ type connState struct {
 	ticket     network.RendezvousTicket
 	source     string
 	serviceKey string
+	// challenge is the inviter-registration nonce issued to this connection.
+	challenge registry.Challenge
 }
 
 func remoteSourceIP(remoteAddress string) string {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/v57/hub-net-node/protocol"
 	network "github.com/v57/hub-service-go/protocol"
 )
 
@@ -40,170 +41,167 @@ func signChallenge(t *testing.T, priv ed25519.PrivateKey, nonce string) string {
 	return sig
 }
 
-func TestChallengeIssuesNonceAndVerifyAcceptsValidSignature(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{now: func() time.Time { return now }})
-	spki, priv := newServiceKey(t)
+type owner struct{ name string }
 
-	nonce, err := reg.Challenge(spki)
+// register issues a challenge and answers it for owner.
+func register(t *testing.T, reg *Registry, spki string, priv ed25519.PrivateKey, by *owner) {
+	t.Helper()
+	challenge, err := reg.NewChallenge()
 	if err != nil {
-		t.Fatalf("Challenge: %v", err)
+		t.Fatal(err)
 	}
-	if nonce == "" {
-		t.Fatal("empty nonce")
+	if _, err := reg.Register(spki, challenge, signChallenge(t, priv, challenge.Nonce), by); err != nil {
+		t.Fatalf("Register: %v", err)
 	}
+}
+
+func clock(now *time.Time) Options {
+	return Options{now: func() time.Time { return *now }}
+}
+
+func TestRegisterAcceptsValidSignature(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	reg := New(clock(&now))
+	spki, priv := newServiceKey(t)
 	if reg.Online(spki) {
-		t.Fatal("online before Verify")
+		t.Fatal("online before Register")
 	}
-	_, err = reg.Verify(spki, signChallenge(t, priv, nonce))
-	if err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
+	register(t, reg, spki, priv, &owner{})
 	if !reg.Online(spki) {
-		t.Fatal("not online after Verify")
+		t.Fatal("not online after Register")
 	}
 }
 
-func TestVerifyRejectsUnknownChallenge(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{now: func() time.Time { return now }})
-	spki, priv := newServiceKey(t)
-	// No Challenge() issued first.
-	if _, err := reg.Verify(spki, signChallenge(t, priv, "AAAAAAAAAAAAAAAAAAAA")); !errors.Is(err, ErrUnknownChallenge) {
-		t.Fatalf("Verify = %v, want ErrUnknownChallenge", err)
-	}
-}
-
-func TestVerifyRejectsInvalidSignature(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{now: func() time.Time { return now }})
+func TestRegisterRejectsMissingChallenge(t *testing.T) {
+	now := time.Now()
+	reg := New(clock(&now))
 	spki, _ := newServiceKey(t)
-	if _, err := reg.Challenge(spki); err != nil {
-		t.Fatal(err)
-	}
-	// A valid base64 string that is not a signature over the nonce.
-	bogus := base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
-	if _, err := reg.Verify(spki, bogus); !errors.Is(err, ErrInvalidSignature) {
-		t.Fatalf("Verify = %v, want ErrInvalidSignature", err)
+	if _, err := reg.Register(spki, Challenge{}, "c2ln", &owner{}); !errors.Is(err, ErrUnknownChallenge) {
+		t.Fatalf("Register = %v, want ErrUnknownChallenge", err)
 	}
 }
 
-func TestVerifyRejectsMalformedServiceKey(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{now: func() time.Time { return now }})
-	if _, err := reg.Challenge("not-a-spki"); !errors.Is(err, ErrMalformedServiceKey) {
-		t.Fatalf("Challenge = %v, want ErrMalformedServiceKey", err)
+func TestRegisterRejectsInvalidSignature(t *testing.T) {
+	now := time.Now()
+	reg := New(clock(&now))
+	spki, _ := newServiceKey(t)
+	_, otherPriv := newServiceKey(t)
+	challenge, _ := reg.NewChallenge()
+	if _, err := reg.Register(spki, challenge, signChallenge(t, otherPriv, challenge.Nonce), &owner{}); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("Register = %v, want ErrInvalidSignature", err)
 	}
-	if _, err := reg.Verify("not-a-spki", "AAAA"); !errors.Is(err, ErrMalformedServiceKey) {
-		t.Fatalf("Verify = %v, want ErrMalformedServiceKey", err)
-	}
-}
-
-func TestVerifyRejectsNonceReplay(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{now: func() time.Time { return now }})
-	spki, priv := newServiceKey(t)
-	nonce, err := reg.Challenge(spki)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig := signChallenge(t, priv, nonce)
-	if _, err := reg.Verify(spki, sig); err != nil {
-		t.Fatalf("first Verify: %v", err)
-	}
-	// Same nonce/signature cannot register a second time.
-	if _, err := reg.Verify(spki, sig); !errors.Is(err, ErrUnknownChallenge) {
-		t.Fatalf("replay Verify = %v, want ErrUnknownChallenge", err)
-	}
-}
-
-func TestChallengeExpiryTreatedAsUnknown(t *testing.T) {
-	clock := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{Lease: time.Minute, ChallengeTTL: time.Minute, now: func() time.Time { return clock }})
-	spki, priv := newServiceKey(t)
-	nonce, err := reg.Challenge(spki)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Advance past the challenge TTL.
-	clock = clock.Add(2 * time.Minute)
-	if _, err := reg.Verify(spki, signChallenge(t, priv, nonce)); !errors.Is(err, ErrUnknownChallenge) {
-		t.Fatalf("Verify = %v, want ErrUnknownChallenge after challenge expiry", err)
-	}
-}
-
-func TestDisconnectMakesOffline(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{now: func() time.Time { return now }})
-	spki, priv := newServiceKey(t)
-	nonce, err := reg.Challenge(spki)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = reg.Verify(spki, signChallenge(t, priv, nonce))
-	if err != nil {
-		t.Fatal(err)
-	}
-	reg.Disconnect(spki)
 	if reg.Online(spki) {
-		t.Fatal("online after Disconnect")
+		t.Fatal("online after a bad signature")
 	}
-	// Re-registration works after disconnect.
-	nonce2, err := reg.Challenge(spki)
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestRegisterRejectsMalformedServiceKey(t *testing.T) {
+	now := time.Now()
+	reg := New(clock(&now))
+	challenge, _ := reg.NewChallenge()
+	if _, err := reg.Register("not-a-key", challenge, "c2ln", &owner{}); !errors.Is(err, ErrMalformedServiceKey) {
+		t.Fatalf("Register = %v, want ErrMalformedServiceKey", err)
 	}
-	if _, err := reg.Verify(spki, signChallenge(t, priv, nonce2)); err != nil {
+}
+
+func TestExpiredChallengeIsRejected(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	reg := New(Options{ChallengeTTL: time.Minute, now: func() time.Time { return now }})
+	spki, priv := newServiceKey(t)
+	challenge, _ := reg.NewChallenge()
+	now = now.Add(2 * time.Minute)
+	if _, err := reg.Register(spki, challenge, signChallenge(t, priv, challenge.Nonce), &owner{}); !errors.Is(err, ErrUnknownChallenge) {
+		t.Fatalf("Register = %v, want ErrUnknownChallenge", err)
+	}
+}
+
+// Asking for a challenge used to reset the key's registration, so anyone who
+// knew an inviter's public key could knock it offline.
+func TestChallengeDoesNotDisplaceRegisteredInviter(t *testing.T) {
+	now := time.Now()
+	reg := New(clock(&now))
+	spki, priv := newServiceKey(t)
+	register(t, reg, spki, priv, &owner{"inviter"})
+	if _, err := reg.NewChallenge(); err != nil {
 		t.Fatal(err)
 	}
 	if !reg.Online(spki) {
-		t.Fatal("not online after re-registration")
+		t.Fatal("a challenge request displaced the registered inviter")
+	}
+}
+
+// A reconnecting inviter registers on a new connection before the old one is
+// cleaned up; the old connection must not drop the new registration.
+func TestStaleConnectionDisconnectKeepsNewerRegistration(t *testing.T) {
+	now := time.Now()
+	reg := New(clock(&now))
+	spki, priv := newServiceKey(t)
+	old, current := &owner{"old"}, &owner{"current"}
+	register(t, reg, spki, priv, old)
+	register(t, reg, spki, priv, current)
+	reg.Disconnect(spki, old)
+	if !reg.Online(spki) {
+		t.Fatal("stale connection dropped the newer registration")
+	}
+	reg.Disconnect(spki, current)
+	if reg.Online(spki) {
+		t.Fatal("owner disconnect left the registration online")
+	}
+}
+
+func TestPushReachesOnlyBoundOwner(t *testing.T) {
+	now := time.Now()
+	reg := New(clock(&now))
+	spki, priv := newServiceKey(t)
+	current := &owner{}
+	register(t, reg, spki, priv, current)
+	reg.Bind(spki, &owner{"other"}, func(protocol.Envelope) { t.Fatal("bound by a non-owner") })
+	if reg.Push(spki, protocol.Envelope{}) {
+		t.Fatal("push succeeded with no bound connection")
+	}
+	pushed := false
+	reg.Bind(spki, current, func(protocol.Envelope) { pushed = true })
+	if !reg.Push(spki, protocol.Envelope{}) || !pushed {
+		t.Fatal("push to the owner failed")
 	}
 }
 
 func TestSweepExpiresRegistration(t *testing.T) {
-	clock := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{Lease: time.Minute, now: func() time.Time { return clock }})
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	reg := New(Options{Lease: time.Minute, now: func() time.Time { return now }})
 	spki, priv := newServiceKey(t)
-	nonce, err := reg.Challenge(spki)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = reg.Verify(spki, signChallenge(t, priv, nonce))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reg.Len() != 1 {
-		t.Fatalf("Len = %d, want 1", reg.Len())
-	}
-	clock = clock.Add(2 * time.Minute)
+	register(t, reg, spki, priv, &owner{})
+	now = now.Add(2 * time.Minute)
 	if reg.Online(spki) {
 		t.Fatal("online after lease expiry")
 	}
-	if removed := reg.Sweep(); removed != 1 {
-		t.Fatalf("Sweep removed %d, want 1", removed)
-	}
-	if reg.Len() != 0 {
-		t.Fatalf("Len = %d after Sweep, want 0", reg.Len())
+	if removed := reg.Sweep(); removed != 1 || reg.Len() != 0 {
+		t.Fatalf("Sweep removed %d, Len %d", removed, reg.Len())
 	}
 }
 
-func TestRegistryBoundByMaxEntries(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+// Capacity counts registrations only: challenges for random keys must not
+// fill the registry.
+func TestCapacityCountsRegistrationsOnly(t *testing.T) {
+	now := time.Now()
 	reg := New(Options{MaxEntries: 1, now: func() time.Time { return now }})
-	spki1, _ := newServiceKey(t)
-	if _, err := reg.Challenge(spki1); err != nil {
-		t.Fatal(err)
+	for range 10 {
+		if _, err := reg.NewChallenge(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	spki2, _ := newServiceKey(t)
-	if _, err := reg.Challenge(spki2); !errors.Is(err, ErrCapacityExceeded) {
-		t.Fatalf("Challenge = %v, want ErrCapacityExceeded", err)
+	spki1, priv1 := newServiceKey(t)
+	register(t, reg, spki1, priv1, &owner{})
+	spki2, priv2 := newServiceKey(t)
+	challenge, _ := reg.NewChallenge()
+	if _, err := reg.Register(spki2, challenge, signChallenge(t, priv2, challenge.Nonce), &owner{}); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("Register = %v, want ErrCapacityExceeded", err)
 	}
 }
 
 func TestOnlineFalseForUnknownKey(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	reg := New(Options{now: func() time.Time { return now }})
+	now := time.Now()
+	reg := New(clock(&now))
 	spki, _ := newServiceKey(t)
 	if reg.Online(spki) {
 		t.Fatal("online for never-registered key")

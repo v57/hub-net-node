@@ -4,7 +4,7 @@
 // An inviter that can issue compact invitations registers here after proving
 // possession of the service Ed25519 key that signs its invitations. A joiner's
 // session.open carrying an invitation is accepted only when the invitation's
-// signing key is currently online (Connected and within its lease). The node
+// signing key is currently online (registered and within its lease). The node
 // never forwards application traffic; the registry is coordination-only and
 // lives entirely in memory, so a node restart drops every registration —
 // inviters simply re-register.
@@ -44,28 +44,35 @@ var (
 
 // Entry is the live registration state for one inviter.
 type Entry struct {
-	ServiceKey        string
-	ChallengeNonce    string
-	ChallengeBytes    []byte
-	ChallengeIssuedAt time.Time
-	ExpiresAt         time.Time
-	// Connected is true once the agent answered the challenge and holds the
-	// registration while its connection is open.
-	Connected bool
+	ServiceKey string
+	ExpiresAt  time.Time
+	// owner identifies the connection that proved the key. Only that
+	// connection can bind, refresh or drop the registration.
+	owner any
 	// send pushes an envelope to the agent's open connection so the node can
 	// notify it of an unregistration event. nil when no connection is bound.
 	send func(protocol.Envelope)
+}
+
+// Challenge is a nonce issued to one connection. The connection keeps it;
+// the registry is untouched until the signature over it verifies, so asking
+// for a challenge can neither displace a registered inviter nor fill the
+// registry.
+type Challenge struct {
+	Nonce    string
+	bytes    []byte
+	issuedAt time.Time
 }
 
 // Options configures a Registry.
 type Options struct {
 	// Lease is the registration lease. Defaults to protocol.DefaultRegistrationLifetime.
 	Lease time.Duration
-	// MaxEntries bounds the total number of registered/challenged inviters.
+	// MaxEntries bounds the total number of registered inviters.
 	// Defaults to 1024, the same order as the UDP observation capacity.
 	MaxEntries int
-	// ChallengeTTL bounds how long an unverified challenge remains valid
-	// before it must be re-requested. Defaults to Lease.
+	// ChallengeTTL bounds how long an issued challenge can be answered.
+	// Defaults to Lease.
 	ChallengeTTL time.Duration
 	// now is the clock; tests inject a controllable time.
 	now func() time.Time
@@ -108,83 +115,63 @@ func New(options Options) *Registry {
 	}
 }
 
-// Challenge issues a fresh random nonce for serviceKey and returns its
-// base64url encoding. The nonce is valid for the challenge TTL; a repeat
-// request for an in-flight challenge refreshes it. Re-issuing a challenge for
-// an already-Connected entry re-opens it (the old connection is responsible
-// for unbinding itself on disconnect). Returns ErrCapacityExceeded when the
-// total entry bound would be exceeded by a brand-new key.
-func (r *Registry) Challenge(serviceKey string) (string, error) {
-	if err := validateServiceKey(serviceKey); err != nil {
-		return "", err
-	}
+// NewChallenge issues a random nonce for the calling connection to keep.
+func (r *Registry) NewChallenge() (Challenge, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("registry: generate nonce: %w", err)
+		return Challenge{}, fmt.Errorf("registry: generate nonce: %w", err)
 	}
-	nonce := base64.RawURLEncoding.EncodeToString(raw[:])
-	now := r.now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sweepLocked(now)
-	entry, ok := r.entries[serviceKey]
-	if !ok {
-		if len(r.entries) >= r.maxEntries {
-			return "", ErrCapacityExceeded
-		}
-		entry = &Entry{ServiceKey: serviceKey}
-		r.entries[serviceKey] = entry
-	}
-	entry.ChallengeNonce = nonce
-	entry.ChallengeBytes = append(entry.ChallengeBytes[:0], raw[:]...)
-	entry.ChallengeIssuedAt = now
-	// A new challenge invalidates any prior Connected state; the caller that
-	// completes this challenge becomes the current registrant.
-	entry.Connected = false
-	entry.send = nil
-	return nonce, nil
+	return Challenge{
+		Nonce:    base64.RawURLEncoding.EncodeToString(raw[:]),
+		bytes:    raw[:],
+		issuedAt: r.now(),
+	}, nil
 }
 
-// Verify checks the agent's signature over its outstanding challenge nonce
-// and, on success, marks the entry Connected with a fresh lease. The signature
-// is over the raw nonce bytes under the inviter-registration domain. The nonce
-// is consumed: a second Verify with the same nonce fails as unknown. Returns
-// the registration expiry on success.
-func (r *Registry) Verify(serviceKey, signature string) (time.Time, error) {
+// Register verifies the agent's signature over challenge (the inviter-
+// registration domain over the raw nonce bytes) and registers serviceKey for
+// owner with a fresh lease. A newer registration of the same key replaces the
+// previous owner. Returns the registration expiry.
+func (r *Registry) Register(serviceKey string, challenge Challenge, signature string, owner any) (time.Time, error) {
 	rawPub, err := decodeServiceKey(serviceKey)
 	if err != nil {
 		return time.Time{}, err
 	}
 	now := r.now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sweepLocked(now)
-	entry, ok := r.entries[serviceKey]
-	if !ok || len(entry.ChallengeBytes) == 0 || !entry.ChallengeIssuedAt.Add(r.challengeTTL).After(now) {
+	if len(challenge.bytes) == 0 || !challenge.issuedAt.Add(r.challengeTTL).After(now) {
 		return time.Time{}, ErrUnknownChallenge
 	}
 	sigBytes, err := base64.StdEncoding.DecodeString(signature)
 	if err != nil {
 		return time.Time{}, ErrInvalidSignature
 	}
-	input, err := network.SignatureInputForBytes(network.PurposeInviterRegistration, entry.ChallengeBytes)
+	input, err := network.SignatureInputForBytes(network.PurposeInviterRegistration, challenge.bytes)
 	if err != nil {
 		return time.Time{}, err
 	}
 	if !ed25519.Verify(ed25519.PublicKey(rawPub), input, sigBytes) {
 		return time.Time{}, ErrInvalidSignature
 	}
-	entry.Connected = true
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sweepLocked(now)
+	entry, ok := r.entries[serviceKey]
+	if !ok {
+		if len(r.entries) >= r.maxEntries {
+			return time.Time{}, ErrCapacityExceeded
+		}
+		entry = &Entry{ServiceKey: serviceKey}
+		r.entries[serviceKey] = entry
+	}
+	if entry.owner != owner {
+		entry.send = nil
+	}
+	entry.owner = owner
 	entry.ExpiresAt = now.Add(r.lease)
-	expiry := entry.ExpiresAt
-	// Consume the nonce so it cannot be replayed into a second registration.
-	entry.ChallengeNonce = ""
-	entry.ChallengeBytes = nil
-	entry.ChallengeIssuedAt = time.Time{}
-	return expiry, nil
+	return entry.ExpiresAt, nil
 }
 
-// Online reports whether serviceKey is currently Connected and within its
+// Online reports whether serviceKey is registered and within its
 // lease. Used by the invitation session.open path to gate joins on inviter
 // presence.
 func (r *Registry) Online(serviceKey string) bool {
@@ -195,30 +182,29 @@ func (r *Registry) Online(serviceKey string) bool {
 	if !ok {
 		return false
 	}
-	return entry.Connected && entry.ExpiresAt.After(now)
+	return entry.ExpiresAt.After(now)
 }
 
-// Bind attaches a write callback to a Connected entry so the node can push an
-// inviter.unregistered envelope when the registration ends. No-op if the entry
-// is absent or not Connected.
-func (r *Registry) Bind(serviceKey string, send func(protocol.Envelope)) {
+// Bind attaches owner's write callback to its registration so the node can
+// push to the inviter. No-op unless owner holds the registration.
+func (r *Registry) Bind(serviceKey string, owner any, send func(protocol.Envelope)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry, ok := r.entries[serviceKey]
-	if !ok || !entry.Connected {
+	if !ok || entry.owner != owner {
 		return
 	}
 	entry.send = send
 }
 
-// Push delivers one envelope to a Connected registrant's connection. It
-// returns false when the entry is absent, not Connected, or has no bound
+// Push delivers one envelope to a registrant's connection. It
+// returns false when the entry is absent, expired, or has no bound
 // connection. The callback runs outside the registry lock so a slow or
 // blocked connection cannot stall registration state.
 func (r *Registry) Push(serviceKey string, envelope protocol.Envelope) bool {
 	r.mu.Lock()
 	entry, ok := r.entries[serviceKey]
-	if !ok || !entry.Connected || entry.send == nil {
+	if !ok || entry.send == nil || !entry.ExpiresAt.After(r.now()) {
 		r.mu.Unlock()
 		return false
 	}
@@ -228,42 +214,37 @@ func (r *Registry) Push(serviceKey string, envelope protocol.Envelope) bool {
 	return true
 }
 
-// Disconnect clears the Connected/send state for serviceKey. Called from a
-// connection's cleanup path. The entry is dropped entirely: an agent must
-// re-challenge to register again.
-func (r *Registry) Disconnect(serviceKey string) {
+// Disconnect drops owner's registration of serviceKey. Called from a
+// connection's cleanup path; a connection that was replaced by a newer
+// registration of the same key leaves that registration alone.
+func (r *Registry) Disconnect(serviceKey string, owner any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.entries[serviceKey]; !ok {
-		return
+	if entry, ok := r.entries[serviceKey]; ok && entry.owner == owner {
+		delete(r.entries, serviceKey)
 	}
-	delete(r.entries, serviceKey)
 }
 
-// Sweep removes every entry whose lease has expired or whose challenge has
-// expired without being answered. Returns the count removed.
+// Sweep removes every entry whose lease has expired. Returns the count
+// removed.
 func (r *Registry) Sweep() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.sweepLocked(r.now())
 }
 
-// Len returns the number of tracked entries (challenged + connected). Used by
-// health reporting.
+// Len returns the number of registered inviters. Used by health reporting.
 func (r *Registry) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.entries)
 }
 
-// sweepLocked reclaims expired entries. An entry is removable when it has no
-// live challenge window and no live connected lease.
+// sweepLocked reclaims entries whose lease expired.
 func (r *Registry) sweepLocked(now time.Time) int {
 	removed := 0
 	for key, entry := range r.entries {
-		challengeLive := len(entry.ChallengeBytes) > 0 && entry.ChallengeIssuedAt.Add(r.challengeTTL).After(now)
-		leaseLive := entry.Connected && entry.ExpiresAt.After(now)
-		if !challengeLive && !leaseLive {
+		if !entry.ExpiresAt.After(now) {
 			delete(r.entries, key)
 			removed++
 		}
