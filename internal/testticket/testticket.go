@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/v57/hub-service-go/identity"
-	network "github.com/v57/hub-service-go/protocol"
+	"github.com/v57/hub-net-node/identity"
+	network "github.com/v57/hub-net-node/models"
 )
 
 // Signed builds one valid ticket bound to nodeID, signed by a fresh Hub key.

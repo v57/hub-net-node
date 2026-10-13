@@ -23,8 +23,8 @@ import (
 	"sync"
 	"time"
 
+	network "github.com/v57/hub-net-node/models"
 	"github.com/v57/hub-net-node/protocol"
-	network "github.com/v57/hub-service-go/protocol"
 )
 
 // ObservedEndpoint remains an alias for callers of session.Store; wire shape

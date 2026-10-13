@@ -10,7 +10,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"strings"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,12 +26,12 @@ import (
 	"github.com/v57/hub-net-node/invitation"
 	"github.com/v57/hub-net-node/limiter"
 	"github.com/v57/hub-net-node/logging"
+	network "github.com/v57/hub-net-node/models"
 	"github.com/v57/hub-net-node/protocol"
 	"github.com/v57/hub-net-node/registry"
 	"github.com/v57/hub-net-node/session"
 	"github.com/v57/hub-net-node/ticket"
 	"github.com/v57/hub-net-node/transport/ws"
-	network "github.com/v57/hub-service-go/protocol"
 )
 
 // RendezvousPath is the WebSocket endpoint an agent opens to coordinate.

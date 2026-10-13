@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	network "github.com/v57/hub-net-node/models"
 	"github.com/v57/hub-net-node/protocol"
-	network "github.com/v57/hub-service-go/protocol"
 )
 
 func testLimits() protocol.Limits {

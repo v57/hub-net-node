@@ -1,0 +1,42 @@
+{
+  "envelope": {
+    "version": 1,
+    "signatureDomain": "hub-network/invitation/v1",
+    "tokenId": "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA",
+    "issuedAt": "2026-07-29T00:00:00.000Z",
+    "expiresAt": "2026-07-29T00:10:00.000Z",
+    "hubKey": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+    "invitingKey": "MCowBQYDK2VwAyEAERERERERERERERERERERERERERERERERERERERERERE=",
+    "invitingAgentAddress": "100.96.0.2",
+    "hubProHost": "100.96.0.1",
+    "scopes": [
+      {
+        "audience": "node",
+        "actions": [
+          "bootstrap-rendezvous"
+        ]
+      },
+      {
+        "audience": "inviting-agent",
+        "actions": [
+          "bootstrap-peer"
+        ]
+      },
+      {
+        "audience": "joiner",
+        "actions": [
+          "bootstrap-peer",
+          "enroll-profile",
+          "read-hub-header"
+        ]
+      },
+      {
+        "audience": "hub-pro",
+        "actions": [
+          "enroll-profile"
+        ]
+      }
+    ],
+    "signature": "iV2wjh3A1/+ukB4mxVbbBgKIkMleOcMwlghOrv7aBZJ/oj41VlCfdK4rmrEgTQP+Cmoja0b8c8suxg3cx71cCQ=="
+  }
+}

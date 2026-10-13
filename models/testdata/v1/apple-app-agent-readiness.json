@@ -1,0 +1,53 @@
+{
+  "cases": [
+    {
+      "expected": false,
+      "field": "wireGuardKey",
+      "name": "mutation",
+      "now": "2026-07-31T12:00:15.000Z",
+      "value": "bXV0YXRlZC13aXJlZ3VhcmQta2V5"
+    },
+    {
+      "expected": false,
+      "name": "expiry",
+      "now": "2026-07-31T12:00:31.000Z"
+    },
+    {
+      "expected": false,
+      "expectedHubNetworkId": "018f0f67-89ab-7def-8123-456789abcdee",
+      "name": "cross-hub-replay",
+      "now": "2026-07-31T12:00:15.000Z"
+    },
+    {
+      "expected": false,
+      "expectedTunnelInstanceId": "tunnel-stale",
+      "name": "stale-tunnel-instance",
+      "now": "2026-07-31T12:00:15.000Z"
+    },
+    {
+      "expected": false,
+      "field": "version",
+      "name": "unknown-major-version",
+      "now": "2026-07-31T12:00:15.000Z",
+      "value": 2
+    }
+  ],
+  "inputSha256": "66b8ae9e638c579df80560756f9867fae5c43f17a884cbcb334ad94e88c91cbe",
+  "publicKey": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "signatureInputBase64": "aHViLW5ldHdvcmsvYXBwbGUtYXBwLWFnZW50LXJlYWRpbmVzcy92MQAAAAFSeyJjYXBhYmlsaXRpZXMiOlsiaW52aXRhdGlvbi1ib290c3RyYXAtdjEiXSwiZXhwaXJlc0F0IjoiMjAyNi0wNy0zMVQxMjowMDozMC4wMDBaIiwiZ2VuZXJhdGlvbiI6NywiaHViTmV0d29ya0lkIjoiMDE4ZjBmNjctODlhYi03ZGVmLTgxMjMtNDU2Nzg5YWJjZGVmIiwiaXNzdWVkQXQiOiIyMDI2LTA3LTMxVDEyOjAwOjAwLjAwMFoiLCJzaWduYXR1cmVEb21haW4iOiJodWItbmV0d29yay9hcHBsZS1hcHAtYWdlbnQtcmVhZGluZXNzL3YxIiwidHVubmVsSW5zdGFuY2VJZCI6InR1bm5lbC0wMThmMGY2NyIsInZlcnNpb24iOjEsIndpcmVHdWFyZEtleSI6ImQybHlaV2QxWVhKa0xXdGxlUT09In0=",
+  "valid": {
+    "version": 1,
+    "signatureDomain": "hub-network/apple-app-agent-readiness/v1",
+    "hubNetworkId": "018f0f67-89ab-7def-8123-456789abcdef",
+    "wireGuardKey": "d2lyZWd1YXJkLWtleQ==",
+    "tunnelInstanceId": "tunnel-018f0f67",
+    "capabilities": [
+      "invitation-bootstrap-v1"
+    ],
+    "generation": 7,
+    "issuedAt": "2026-07-31T12:00:00.000Z",
+    "expiresAt": "2026-07-31T12:00:30.000Z",
+    "signature": "8CWU3I7FOkcQ8WMVk3Cl3BF94/Pc2dO3rYjiovi0bDdxGjwquwwB8rlWJcHrCqCbtmm5mR5yUq/zlg00psEQCA=="
+  }
+}

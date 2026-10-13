@@ -1,0 +1,132 @@
+{
+  "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "publicKey": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "vectors": [
+    {
+      "purpose": "agent-attestation",
+      "envelope": {
+        "attestationId": "att-1",
+        "expiresAt": "2026-07-25T00:05:00.000Z",
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "key": "agent-key",
+        "protocol": "tcp",
+        "serviceKey": "service-key",
+        "shareName": "s3",
+        "target": {
+          "host": "127.0.0.1",
+          "port": 9001
+        },
+        "version": 1
+      },
+      "inputSha256": "ad02d622a476d38d511ed2b6b24d41da6f343f7663fd6126a17b05a406d35cec",
+      "signature": "BYIHQP5wBx+UCsAg2j8PvjMVrHJZy/YTUCbiHZe+qgDHSwAtnAYyVOgKD57dVDIf4ugD/LEEuJop4gIBe9K7Bg=="
+    },
+    {
+      "purpose": "profile-binding",
+      "envelope": {
+        "bindingId": "binding-1",
+        "expiresAt": "2026-07-25T00:05:00.000Z",
+        "hubNetworkId": "018f0f67-89ab-7def-8123-456789abcdef",
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "key": "profile-key",
+        "overlayAddresses": [
+          "100.96.0.2",
+          "fd48:5542:4e45::2"
+        ],
+        "version": 1,
+        "wireGuardKey": "wg-key"
+      },
+      "inputSha256": "d4d6fbb3c17632bd3bbf2b67b2c5315a6e65d2817e3dc4f64eb6b1f6c8756ce9",
+      "signature": "4Nixarn6Z427WR6rzquZIJAUb1wchySBxAHDldoOHOYkSKdsDN2BxNS6mqyc6WZ608qVV0qDxVev7eDg/E4+Ag=="
+    },
+    {
+      "purpose": "connection-grant",
+      "envelope": {
+        "callerAddress": "100.96.0.3",
+        "callerKey": "caller-profile-key",
+        "callerWireGuardKey": "caller-wg-key",
+        "destinationAddress": "100.96.0.2",
+        "destinationPort": 9001,
+        "expiresAt": "2026-07-25T00:01:00.000Z",
+        "generation": 4,
+        "grantId": "grant-1",
+        "hubKey": "hub-key",
+        "hubNetworkId": "018f0f67-89ab-7def-8123-456789abcdef",
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "protocol": "tcp",
+        "providerId": "provider-1",
+        "resourceId": "hnr1_vu5lgvuep3ijwvktdc3c7jtlkbq7tpio",
+        "targetKey": "target-agent-key",
+        "targetWireGuardKey": "target-wg-key",
+        "version": 1
+      },
+      "inputSha256": "7b6765fc35a70d978dd44078f50c039cf051ed509723504a45bae1dfdca65f8b",
+      "signature": "F2b4xfGgSq6+9Ru9lnKc1sWH4OU8vYul+lAsfNzP1HJXGck6mVbdfZuSHwoZEcS7s4Da7Dw/FWiKPgPKZm9SAA=="
+    },
+    {
+      "purpose": "rendezvous-ticket",
+      "envelope": {
+        "expiresAt": "2026-07-25T00:01:00.000Z",
+        "hubKey": "hub-key",
+        "hubNetworkId": "018f0f67-89ab-7def-8123-456789abcdef",
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "key": "profile-key",
+        "nodeId": "node-1",
+        "roles": [
+          "rendezvous"
+        ],
+        "sessionPurpose": "peer-connect",
+        "ticketId": "ticket-1",
+        "version": 1
+      },
+      "inputSha256": "a91339e530a5fdae8a4bd450524199093e6c6f1d5d27dd023156c4e08bc69c00",
+      "signature": "roUIPMIPSUrRqSEDxqc7Il3ucfFomupr7sOZdY3Vf35MeyC/ojV3F+sr2OiAwv5g56qFbbsLvylEaGPSeZH8Bg=="
+    },
+    {
+      "purpose": "direct-bootstrap-request",
+      "envelope": {
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "joinerServiceKey": "joiner-service-key",
+        "joinerWireGuardKey": "joiner-wg-key",
+        "nonce": "nonce-1",
+        "replayId": "replay-1",
+        "signatureDomain": "hub-network/direct-bootstrap-request/v1",
+        "version": 1
+      },
+      "inputSha256": "e390de28d61ca0dcc920ca31819d22e4bebb8495c5a730190c5d27075c116be8",
+      "signature": "YlNiwon2932DXckBpl3UGHPUkmH9PDQrMakiFGji2p28ecKw9Y8yELbtKEoa1QgTVE2TYpLLTw9RGgZ+eKHTCA=="
+    },
+    {
+      "purpose": "direct-bootstrap-response",
+      "envelope": {
+        "endpoints": [
+          {
+            "address": "203.0.113.10",
+            "port": 51820,
+            "transport": "udp"
+          }
+        ],
+        "expiresAt": "2026-07-25T00:05:00.000Z",
+        "hubProHost": "100.96.0.1",
+        "inviterAddress": {
+          "ipv4": "100.127.255.253",
+          "ipv6": "fd48:5542:4e45:ffff::fffd"
+        },
+        "inviterServiceKey": "inviter-service-key",
+        "inviterWireGuardKey": "inviter-wg-key",
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "joinerAddress": {
+          "ipv4": "100.127.255.254",
+          "ipv6": "fd48:5542:4e45:ffff::fffe"
+        },
+        "joinerServiceKey": "joiner-service-key",
+        "joinerWireGuardKey": "joiner-wg-key",
+        "replayId": "replay-1",
+        "signatureDomain": "hub-network/direct-bootstrap-response/v1",
+        "version": 1
+      },
+      "inputSha256": "c44af35852fdaa8134a9c45f3d54df30871a433e2e11023647d45aeadf10703a",
+      "signature": "gpVopObr82ssBxsSLkA+iDvYk2SgoiQ4DZtgrxQo7lsliP/LGDKBB+EiTcerhsTB7y0hUEY8BOBZbJ+TIev1DQ=="
+    }
+  ]
+}

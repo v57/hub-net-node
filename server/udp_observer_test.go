@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	network "github.com/v57/hub-service-go/protocol"
+	network "github.com/v57/hub-net-node/models"
 )
 
 func observationTicket(hubKey, ticketID, key string) network.RendezvousTicket {

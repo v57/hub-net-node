@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	network "github.com/v57/hub-service-go/protocol"
+	network "github.com/v57/hub-net-node/models"
 )
 
 const (
