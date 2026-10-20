@@ -7,8 +7,7 @@ and perform NAT traversal after a Hub-signed ticket; application packets then
 travel directly between agents over WireGuard and never traverse the node.
 
 See [`PROTOCOL.md`](PROTOCOL.md) for the wire contract and no-payload
-invariant, and [`../openspec/changes/hub-network/`](../openspec/changes/hub-network/)
-for the cross-project change that defines this node.
+invariant.
 
 ## Status
 
@@ -29,8 +28,6 @@ implemented. `/healthz` reports protocol capabilities and live session count;
 | HN-407  | Sibling-module build repair           | Complete: removed local `replace` directives, consumes published `channel-go`/`hub-service-go v0.1.0`, clean Docker build                 |
 | HN-408  | RFC 6455 frame-parser hardening       | Complete: attacker-controlled length can no longer panic or over-allocate; masking/reserved-bit/opcode/control-frame validation enforced |
 | HN-412  | Single-use rendezvous tickets         | Complete: post-verification atomic consumption, expiry sweeping, global/source bounds, documented restart and replica boundary           |
-
-Cross-project context: [`../openspec/changes/hub-network/protocol-foundations.md`](../openspec/changes/hub-network/protocol-foundations.md).
 
 ## Layout
 
