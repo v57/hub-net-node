@@ -86,7 +86,7 @@ type AgentProfile struct {
 	Online bool `json:"online,omitempty"`
 }
 
-// AgentProfileRegistration omits Key because hub-pro derives it from the
+// AgentProfileRegistration omits Key because hub-server derives it from the
 // authenticated Channel sender.
 type AgentProfileRegistration struct {
 	Version          int      `json:"version"`
@@ -101,7 +101,7 @@ type AgentBindRequest struct {
 	AgentProfileRegistration
 	BindingKind LocalAgentBindingKind `json:"bindingKind"`
 	// Admission is required on a key's first join bind: the inviter-signed
-	// direct bootstrap response naming this joiner. hub-pro admits the key if
+	// direct bootstrap response naming this joiner. hub-server admits the key if
 	// the signer is currently bound to the network.
 	Admission *DirectBootstrapResponse `json:"admission,omitempty"`
 }
@@ -404,7 +404,7 @@ type BootstrapEndpoint struct {
 
 // BootstrapAddress is a temporary point-to-point address pair assigned for the
 // bootstrap link. These are distinct from the permanent overlay addresses
-// hub-pro assigns after bind.
+// hub-server assigns after bind.
 type BootstrapAddress struct {
 	IPv4 string `json:"ipv4"`
 	IPv6 string `json:"ipv6"`
@@ -428,7 +428,7 @@ type DirectBootstrapRequest struct {
 // DirectBootstrapResponse is signed by the inviter's invitation service key
 // (the same key that signed the compact invitation). It is bound to the request
 // by replayId and joiner identities, and supplies the temporary point-to-point
-// configuration the joiner needs to reach hub-pro through the inviter. Once the
+// configuration the joiner needs to reach hub-server through the inviter. Once the
 // joiner completes hub/net/bind it receives permanent overlay addresses and
 // must drop this temporary tunnel.
 type DirectBootstrapResponse struct {

@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// vectorFile mirrors hub-pro testdata/crypto-v1.json.
+// vectorFile mirrors hub-server testdata/crypto-v1.json.
 type vectorFile struct {
 	Seed      string         `json:"seed"`
 	PublicKey string         `json:"publicKey"`

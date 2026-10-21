@@ -1,4 +1,4 @@
-// crypto.go is the Go mirror of hub-pro src/network/crypto.ts.
+// crypto.go is the Go mirror of hub-server src/network/crypto.ts.
 //
 // Hub Network signs four envelope types in purpose-separated domains so a
 // signature for one cannot be replayed as another. The wire bytes are
@@ -67,7 +67,7 @@ const ConnectionGrantMaxLifetime = 5 * time.Minute
 const RendezvousTicketMaxLifetime = 10 * time.Minute
 
 // DirectBootstrapMaxLifetime bounds a direct bootstrap response's validity. The
-// temporary tunnel is meant to last only until the joiner reaches hub-pro and
+// temporary tunnel is meant to last only until the joiner reaches hub-server and
 // performs an ordinary bind, which replaces it with permanent addresses.
 const DirectBootstrapMaxLifetime = 10 * time.Minute
 
