@@ -216,21 +216,42 @@ func (r *Registry) Push(serviceKey string, envelope protocol.Envelope) bool {
 
 // Disconnect drops owner's registration of serviceKey. Called from a
 // connection's cleanup path; a connection that was replaced by a newer
-// registration of the same key leaves that registration alone.
-func (r *Registry) Disconnect(serviceKey string, owner any) {
+// registration of the same key leaves that registration alone. Reports whether
+// a registration was dropped.
+func (r *Registry) Disconnect(serviceKey string, owner any) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if entry, ok := r.entries[serviceKey]; ok && entry.owner == owner {
 		delete(r.entries, serviceKey)
+		return true
 	}
+	return false
+}
+
+// Lookup returns serviceKey's lease expiry, for diagnostics: ok is false when
+// the key holds no registration (never registered, disconnected or swept).
+func (r *Registry) Lookup(serviceKey string) (expiresAt time.Time, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[serviceKey]
+	if !ok {
+		return time.Time{}, false
+	}
+	return entry.ExpiresAt, true
 }
 
 // Sweep removes every entry whose lease has expired. Returns the count
 // removed.
 func (r *Registry) Sweep() int {
+	return len(r.SweepExpired())
+}
+
+// SweepExpired removes every entry whose lease has expired and returns their
+// service keys.
+func (r *Registry) SweepExpired() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.sweepLocked(r.now())
+	return r.expireLocked(r.now())
 }
 
 // Len returns the number of registered inviters. Used by health reporting.
@@ -242,11 +263,15 @@ func (r *Registry) Len() int {
 
 // sweepLocked reclaims entries whose lease expired.
 func (r *Registry) sweepLocked(now time.Time) int {
-	removed := 0
+	return len(r.expireLocked(now))
+}
+
+func (r *Registry) expireLocked(now time.Time) []string {
+	var removed []string
 	for key, entry := range r.entries {
 		if !entry.ExpiresAt.After(now) {
 			delete(r.entries, key)
-			removed++
+			removed = append(removed, key)
 		}
 	}
 	return removed

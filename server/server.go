@@ -106,7 +106,7 @@ func New(options Options) (*Server, error) {
 		replays:       ticket.NewReplayCache(ticket.DefaultReplayCapacity, ticket.DefaultReplayPerSource, nil),
 		sessions:      sessions,
 		udpObserved:   newUDPObservations(),
-		registry:      registry.New(registry.Options{}),
+		registry:      registry.New(registry.Options{Lease: cfg.RegistrationLease}),
 		peers:         make(map[string]func(protocol.Envelope)),
 		listenAddress: cfg.ListenAddress,
 		shutdownCh:    make(chan struct{}),
@@ -289,7 +289,9 @@ func (s *Server) runSweepLoop(ctx context.Context, stopped chan struct{}) {
 			removed := s.sessions.Sweep()
 			s.replays.Sweep()
 			s.udpObserved.sweep(time.Now())
-			s.registry.Sweep()
+			for _, key := range s.registry.SweepExpired() {
+				s.logger.Info("inviter registration expired", "key", keyTag(key))
+			}
 			for i := 0; i < removed; i++ {
 				s.reporter.DecrementSessions()
 			}
@@ -351,7 +353,8 @@ func (s *Server) serveRendezvous(ctx context.Context, state *connState) {
 			s.reporter.DecrementSessions()
 		}
 		if state.serviceKey != "" {
-			s.registry.Disconnect(state.serviceKey, state)
+			dropped := s.registry.Disconnect(state.serviceKey, state)
+			s.logger.Info("inviter connection closed", "key", keyTag(state.serviceKey), "from", state.source, "registrationDropped", dropped)
 		}
 	}()
 
@@ -400,7 +403,9 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 
 	switch envelope.Type {
 	case protocol.MessageRegisterInviter:
-		if state.sessionID != "" {
+		// A registered inviter renews its lease on its own connection, also while one of its bootstrap sessions is
+		// open; a connection that opened a plain session can't become an inviter.
+		if state.sessionID != "" && state.serviceKey != envelope.ServiceKey {
 			s.writeError(state, "bad_request", "session open on registering connection", false)
 			return false
 		}
@@ -428,9 +433,12 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			s.writeError(state, errorCode(err), err.Error(), false)
 			return false
 		}
-		if state.serviceKey != "" && state.serviceKey != envelope.ServiceKey {
+		renewed := state.serviceKey == envelope.ServiceKey
+		if state.serviceKey != "" && !renewed {
 			s.registry.Disconnect(state.serviceKey, state)
 		}
+		s.logger.Info("inviter registered", "key", keyTag(envelope.ServiceKey), "from", state.source, "renewed", renewed,
+			"expiresAt", expiry.UTC().Format(time.RFC3339))
 		state.serviceKey = envelope.ServiceKey
 		// Bind a write callback so the node can push bootstrap requests to
 		// this connection.
@@ -448,15 +456,20 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 				return false
 			}
 			verified, err := invitation.VerifyCode(envelope.InvitationCode, time.Now())
-			if err != nil || invitation.ValidatePeer(verified, envelope.Key) != nil {
+			if err == nil {
+				err = invitation.ValidatePeer(verified, envelope.Key)
+			}
+			if err != nil {
+				s.logger.Info("invitation rejected", "from", state.source, "key", keyTag(envelope.Key), "reason", err.Error())
 				s.writeError(state, "unauthorized", "invitation rejected", false)
 				return false
 			}
 			if envelope.TokenDigest != verified.TokenDigest {
+				s.logger.Info("invitation rejected", "from", state.source, "key", keyTag(envelope.Key), "reason", "token digest does not match the code")
 				s.writeError(state, "unauthorized", "invitation rejected", false)
 				return false
 			}
-			s.logger.Info("session.open joiner", "from", state.source, "digest", short(envelope.TokenDigest), "key", short(envelope.Key))
+			s.logger.Info("session.open joiner", "from", state.source, "digest", short(envelope.TokenDigest), "key", keyTag(envelope.Key))
 			// The inviter's own side must come from its registration
 			// connection; holding the code alone does not make a client the
 			// inviter.
@@ -468,6 +481,7 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			// currently registered online. This gates joins on inviter presence
 			// without the node relaying any application traffic.
 			if !s.registry.Online(verified.InvitingKey) {
+				s.logInviterOffline(state, verified.InvitingKey)
 				s.writeError(state, "unauthorized", "inviter offline", false)
 				return false
 			}
@@ -532,10 +546,11 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 				}) {
 					s.replays.Release(singleUseKey)
 					s.replays.Release(replayKey)
+					s.logInviterOffline(state, verified.InvitingKey)
 					s.writeError(state, "unauthorized", "inviter offline", false)
 					return false
 				}
-				s.logger.Info("push bootstrap pending", "to", short(verified.InvitingKey), "digest", short(envelope.TokenDigest))
+				s.logger.Info("push bootstrap pending", "to", keyTag(verified.InvitingKey), "digest", short(envelope.TokenDigest))
 			}
 			id, openErr := s.sessions.OpenBootstrap(bootstrapTicket, observed, verified.InvitingKey, envelope.TransactionID, envelope.TunnelInstance, envelope.Generation)
 			if openErr != nil {
@@ -562,6 +577,7 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 		}
 		rendezvousTicket := *envelope.Ticket
 		if err := s.tickets.Verify(rendezvousTicket); err != nil {
+			s.logger.Info("ticket rejected", "from", state.source, "key", keyTag(rendezvousTicket.Key), "reason", err.Error())
 			s.writeError(state, "unauthorized", "ticket rejected", false)
 			return false
 		}
@@ -577,6 +593,7 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 		}
 		expiresAt, err := time.Parse(time.RFC3339Nano, rendezvousTicket.ExpiresAt)
 		if err != nil {
+			s.logger.Info("ticket rejected", "from", state.source, "key", keyTag(rendezvousTicket.Key), "reason", "unreadable expiry")
 			s.writeError(state, "unauthorized", "ticket rejected", false)
 			return false
 		}
@@ -739,6 +756,8 @@ func (s *Server) unregisterPeer(sessionID string) {
 // writeError sends one MessageError envelope. retryable controls whether the
 // agent may reopen (e.g. rate limit) versus must back off (unauthorized).
 func (s *Server) writeError(state *connState, code, message string, retryable bool) {
+	s.logger.Info("error reply", "code", code, "message", message, "from", state.source,
+		"key", keyTag(state.serviceKey), "session", state.sessionID)
 	s.writeEnvelope(state, protocol.Envelope{
 		MajorVersion: protocol.MajorVersion,
 		MinorVersion: protocol.MinorVersion,
@@ -766,6 +785,28 @@ func (s *Server) writeEnvelope(state *connState, envelope protocol.Envelope) {
 }
 
 // short abbreviates a long key/digest for log lines.
+// logInviterOffline says why an invitation's inviter isn't online: never registered (or its connection closed), or
+// its lease ran out without a renewal
+func (s *Server) logInviterOffline(state *connState, invitingKey string) {
+	expiresAt, ok := s.registry.Lookup(invitingKey)
+	if !ok {
+		s.logger.Info("inviter offline", "inviter", keyTag(invitingKey), "from", state.source, "reason", "not registered")
+		return
+	}
+	s.logger.Info("inviter offline", "inviter", keyTag(invitingKey), "from", state.source, "reason", "lease expired",
+		"expiredAgo", time.Since(expiresAt).Round(time.Second).String())
+}
+
+// keyTag shortens an Ed25519 SPKI for logs to the first 12 characters after the shared DER prefix, so different keys
+// stay distinguishable; other values are shortened as they are
+func keyTag(key string) string {
+	const spkiPrefix = "MCowBQYDK2VwAyEA"
+	if strings.HasPrefix(key, spkiPrefix) {
+		return short(strings.TrimPrefix(key, spkiPrefix))
+	}
+	return short(key)
+}
+
 func short(v string) string {
 	if len(v) <= 12 {
 		return v

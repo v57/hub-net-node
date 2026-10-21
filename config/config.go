@@ -84,6 +84,10 @@ type Config struct {
 	MaxConnectionsPerSource int           `json:"maxConnectionsPerSource,omitempty"`
 	HandshakeTimeout        time.Duration `json:"-"`
 	MaxHeaderBytes          int           `json:"maxHeaderBytes,omitempty"`
+	// RegistrationLease is how long an online inviter's registration lasts
+	// without a renewal. Defaults to protocol.DefaultRegistrationLifetime; it may
+	// only be lowered (tests use a few seconds).
+	RegistrationLease time.Duration `json:"-"`
 }
 
 // Defaults returns a Config populated with documented defaults. Caller may
@@ -101,6 +105,7 @@ func Defaults() Config {
 		MaxConnectionsPerSource: DefaultMaxConnectionsPerSource,
 		HandshakeTimeout:        DefaultHandshakeTimeout,
 		MaxHeaderBytes:          DefaultMaxHeaderBytes,
+		RegistrationLease:       protocol.DefaultRegistrationLifetime,
 	}
 }
 
@@ -146,6 +151,12 @@ func (c *Config) Resolve() error {
 	}
 	if c.Limits.SessionLifetime == 0 {
 		c.Limits = protocol.DefaultLimits()
+	}
+	if c.RegistrationLease == 0 {
+		c.RegistrationLease = protocol.DefaultRegistrationLifetime
+	}
+	if c.RegistrationLease < 0 || c.RegistrationLease > protocol.DefaultRegistrationLifetime {
+		return fmt.Errorf("config: registrationLease must be positive and at most %s", protocol.DefaultRegistrationLifetime)
 	}
 	if err := validateLimits(c.Limits); err != nil {
 		return err

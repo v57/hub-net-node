@@ -20,6 +20,8 @@ func main() {
 	stateDir := flag.String("state-dir", config.DefaultStateDir(), "node state directory")
 	logJSON := flag.Bool("log-json", true, "emit JSON structured logs")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	registrationLease := flag.Duration("registration-lease", 0, "online-inviter registration lease (default and maximum 2m; lower for tests)")
+	sessionLifetime := flag.Duration("session-lifetime", 0, "idle limit of a rendezvous connection (default and maximum 2m; lower for tests)")
 	maxConnections := flag.Int("max-connections", config.DefaultMaxConnections, "maximum accepted TCP connections")
 	maxConnectionsPerSource := flag.Int("max-connections-per-source", config.DefaultMaxConnectionsPerSource, "maximum accepted TCP connections per source IP")
 	flag.Parse()
@@ -35,6 +37,12 @@ func main() {
 	cfg.StateDir = *stateDir
 	cfg.MaxConnections = *maxConnections
 	cfg.MaxConnectionsPerSource = *maxConnectionsPerSource
+	if *registrationLease != 0 {
+		cfg.RegistrationLease = *registrationLease
+	}
+	if *sessionLifetime != 0 {
+		cfg.Limits.SessionLifetime = *sessionLifetime
+	}
 	if !*logJSON {
 		cfg.LogFormat = logging.FormatText
 	}
