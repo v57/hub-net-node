@@ -255,6 +255,55 @@ type RendezvousTicket struct {
 	Signature      string   `json:"signature"`
 }
 
+// PeerLinkSide is one device of a peer link: its service key, the WireGuard key its tunnel uses, its member and its
+// overlay addresses.
+type PeerLinkSide struct {
+	Key          string   `json:"key"`
+	WireGuardKey string   `json:"wireGuardKey"`
+	Member       string   `json:"member"`
+	Addresses    []string `json:"addresses"`
+}
+
+// PeerLinkPort is a protocol and port one side of a link may open on the other.
+type PeerLinkPort struct {
+	Protocol string `json:"protocol"`
+	Port     int    `json:"port"`
+}
+
+// PeerLinkGrant is the hub-signed authorization for one direct WireGuard path between two devices of a hub: the
+// routes each side sends through the other and the ports each may open on the other. The node checks only its
+// signature and lifetime, as an abuse gate; each device checks it against the hub key it pinned when it joined.
+type PeerLinkGrant struct {
+	Version      int            `json:"version"`
+	GrantID      string         `json:"grantId"`
+	HubKey       string         `json:"hubKey"`
+	HubNetworkID string         `json:"hubNetworkId"`
+	Purpose      string         `json:"purpose"`
+	A            PeerLinkSide   `json:"a"`
+	B            PeerLinkSide   `json:"b"`
+	AViaB        []string       `json:"aViaB"`
+	BViaA        []string       `json:"bViaA"`
+	AToB         []PeerLinkPort `json:"aToB"`
+	BToA         []PeerLinkPort `json:"bToA"`
+	IssuedAt     string         `json:"issuedAt"`
+	ExpiresAt    string         `json:"expiresAt"`
+	Signature    string         `json:"signature"`
+}
+
+// LinkEndpoint is an address and UDP port a device declares it can be reached at (LAN, global IPv6).
+type LinkEndpoint struct {
+	Address string `json:"address"`
+	Port    uint16 `json:"port"`
+}
+
+// Peer link purposes: a member and the hub's machine, a client and a device sharing its internet, two devices of a
+// shared service.
+const (
+	PeerLinkPurposeHub     = "hub"
+	PeerLinkPurposeGateway = "gateway"
+	PeerLinkPurposeShare   = "share"
+)
+
 type Candidate struct {
 	Version     int    `json:"version"`
 	CandidateID string `json:"candidateId"`

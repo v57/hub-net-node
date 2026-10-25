@@ -33,7 +33,8 @@ const (
 	PurposeAppleAppAgentReadiness  SignaturePurpose = "apple-app-agent-readiness"
 	PurposeDirectBootstrapRequest  SignaturePurpose = "direct-bootstrap-request"
 	PurposeDirectBootstrapResponse SignaturePurpose = "direct-bootstrap-response"
-	PurposeInviterRegistration     SignaturePurpose = "inviter-registration"
+	PurposePresence                SignaturePurpose = "presence"
+	PurposePeerLink                SignaturePurpose = "peer-link"
 )
 
 // SignatureDomains maps each purpose to its ASCII domain string. Matches the
@@ -47,7 +48,8 @@ var SignatureDomains = map[SignaturePurpose]string{
 	PurposeAppleAppAgentReadiness:  "hub-network/apple-app-agent-readiness/v1",
 	PurposeDirectBootstrapRequest:  "hub-network/direct-bootstrap-request/v1",
 	PurposeDirectBootstrapResponse: "hub-network/direct-bootstrap-response/v1",
-	PurposeInviterRegistration:     "hub-network/inviter-registration/v1",
+	PurposePresence:                "hub-network/presence/v1",
+	PurposePeerLink:                "hub-network/peer-link/v1",
 }
 
 // DomainFor returns the ASCII domain string for purpose.
@@ -65,6 +67,9 @@ const ConnectionGrantMaxLifetime = 5 * time.Minute
 
 // RendezvousTicketMaxLifetime bounds a rendezvous ticket's validity.
 const RendezvousTicketMaxLifetime = 10 * time.Minute
+
+// PeerLinkGrantMaxLifetime bounds a peer link grant: a device away from its hub longer than this needs a new one.
+const PeerLinkGrantMaxLifetime = 31 * 24 * time.Hour
 
 // DirectBootstrapMaxLifetime bounds a direct bootstrap response's validity. The
 // temporary tunnel is meant to last only until the joiner reaches hub-server and

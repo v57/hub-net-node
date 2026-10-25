@@ -83,7 +83,8 @@ trap cleanup EXIT
 
 "$go_command" -C "$root_dir" build -trimpath -o "$tmp_dir/hub-net-node" ./cmd/hub-net-node
 "$go_command" -C "$root_dir" build -trimpath -o "$tmp_dir/rendezvous-client" ./integration/rendezvous_client
-"$tmp_dir/rendezvous-client" -identity "$tmp_dir/hub.identity" -init-identity
+"$tmp_dir/rendezvous-client" -identity "$tmp_dir/hub.identity" -device "$tmp_dir/device-a.identity" -init-identity
+"$tmp_dir/rendezvous-client" -identity "$tmp_dir/hub.identity" -device "$tmp_dir/device-b.identity" -init-identity
 
 for namespace in "$internet" "$router_a" "$router_b" "$agent_a" "$agent_b" "$node"; do
   ip netns add "$namespace"
@@ -227,17 +228,17 @@ ip netns exec "$node" tcpdump -Z root -U -n -i any -w "$tmp_dir/node.pcap" >"$tm
 capture_pid=$!
 sleep 0.2
 
-# Both clients probe from port 51820, rendezvous, and persist only the peer's
-# delivered observedEndpoint. WireGuard is configured after those sockets
+# Both devices register presence; b opens a hub-signed link to a, a accepts, both
+# probe from port 51820 and persist only the peer's observedEndpoint from link.ready. WireGuard is configured after those sockets
 # close, using no fixture-side peer endpoint knowledge.
 ip netns exec "$agent_a" "$tmp_dir/rendezvous-client" \
-  -server 198.18.0.4:1964 -identity "$tmp_dir/hub.identity" \
-  -profile-key profile-a -agent-key agent-a -output "$tmp_dir/endpoint-a" \
+  -server 198.18.0.4:1964 -identity "$tmp_dir/hub.identity" -role target \
+  -device "$tmp_dir/device-a.identity" -peer-device "$tmp_dir/device-b.identity" -output "$tmp_dir/endpoint-a" \
   >"$tmp_dir/client-a.log" 2>&1 &
 client_a_pid=$!
 ip netns exec "$agent_b" "$tmp_dir/rendezvous-client" \
-  -server 198.18.0.4:1964 -identity "$tmp_dir/hub.identity" \
-  -profile-key profile-b -agent-key agent-b -output "$tmp_dir/endpoint-b" \
+  -server 198.18.0.4:1964 -identity "$tmp_dir/hub.identity" -role opener \
+  -device "$tmp_dir/device-b.identity" -peer-device "$tmp_dir/device-a.identity" -output "$tmp_dir/endpoint-b" \
   >"$tmp_dir/client-b.log" 2>&1 &
 client_b_pid=$!
 wait "$client_a_pid"

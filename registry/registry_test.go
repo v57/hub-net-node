@@ -34,7 +34,7 @@ func signChallenge(t *testing.T, priv ed25519.PrivateKey, nonce string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, err := network.SignBytes(network.PurposeInviterRegistration, raw, priv)
+	sig, err := network.SignBytes(network.PurposePresence, raw, priv)
 	if err != nil {
 		t.Fatal(err)
 	}

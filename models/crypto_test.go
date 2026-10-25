@@ -104,8 +104,8 @@ func TestSignatureDomainsAreUnique(t *testing.T) {
 		}
 		seen[domain] = purpose
 	}
-	if len(SignatureDomains) != 9 {
-		t.Fatalf("expected 9 domains, got %d", len(SignatureDomains))
+	if len(SignatureDomains) != 10 {
+		t.Fatalf("expected 10 domains, got %d", len(SignatureDomains))
 	}
 }
 

@@ -65,19 +65,19 @@ func readUntil(t *testing.T, conn net.Conn, messageType protocol.MessageType) pr
 // renewOn re-runs the registration handshake on the inviter's existing connection
 func renewOn(t *testing.T, conn net.Conn, serviceKey string, private ed25519.PrivateKey) protocol.Envelope {
 	t.Helper()
-	sendEnvelope(t, conn, protocol.Envelope{MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageRegisterInviter, RequestID: "renew-1", ServiceKey: serviceKey})
-	challenge := readUntil(t, conn, protocol.MessageInviterChallenge)
+	sendEnvelope(t, conn, protocol.Envelope{MajorVersion: 1, MinorVersion: 0, Type: protocol.MessagePresenceRegister, RequestID: "renew-1", ServiceKey: serviceKey})
+	challenge := readUntil(t, conn, protocol.MessagePresenceChallenge)
 	nonce, err := base64.RawURLEncoding.DecodeString(challenge.ChallengeNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := network.SignBytes(network.PurposeInviterRegistration, nonce, private)
+	signature, err := network.SignBytes(network.PurposePresence, nonce, private)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendEnvelope(t, conn, protocol.Envelope{MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageRegisterInviter, RequestID: "renew-2",
+	sendEnvelope(t, conn, protocol.Envelope{MajorVersion: 1, MinorVersion: 0, Type: protocol.MessagePresenceRegister, RequestID: "renew-2",
 		ServiceKey: serviceKey, ChallengeNonce: challenge.ChallengeNonce, ChallengeSignature: signature})
-	return readUntil(t, conn, protocol.MessageInviterRegistered)
+	return readUntil(t, conn, protocol.MessagePresenceRegistered)
 }
 
 // invite runs one invitation from the joiner's open to both sides' session.close; renew re-registers on the inviter's

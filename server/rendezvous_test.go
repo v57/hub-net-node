@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/v57/hub-net-node/config"
-	"github.com/v57/hub-net-node/internal/testticket"
 	network "github.com/v57/hub-net-node/models"
 	"github.com/v57/hub-net-node/protocol"
 )
@@ -105,42 +104,6 @@ func dialClient(t *testing.T, address string) net.Conn {
 	return conn
 }
 
-// sendUDPProbe obtains the node-observed UDP mapping for a signed ticket and
-// returns the local endpoint that should be observed in loopback tests.
-func sendUDPProbe(t *testing.T, address string, ticket network.RendezvousTicket) *net.UDPAddr {
-	t.Helper()
-	remote, err := net.ResolveUDPAddr("udp", address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, err := net.DialUDP("udp", nil, remote)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	body, err := json.Marshal(protocol.UDPProbe{Version: network.WireVersion, Ticket: ticket})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Write(body); err != nil {
-		t.Fatal(err)
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	responseBody := make([]byte, 1024)
-	n, err := conn.Read(responseBody)
-	if err != nil {
-		t.Fatalf("read UDP probe response: %v", err)
-	}
-	var response protocol.UDPProbeResponse
-	if err := json.Unmarshal(responseBody[:n], &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.Version != network.WireVersion || response.TicketID != ticket.TicketID {
-		t.Fatalf("UDP probe response = %+v", response)
-	}
-	return conn.LocalAddr().(*net.UDPAddr)
-}
-
 func sendInvitationUDPProbe(t *testing.T, address string, probe protocol.InvitationUDPProbe) *net.UDPAddr {
 	t.Helper()
 	remote, err := net.ResolveUDPAddr("udp", address)
@@ -201,11 +164,11 @@ func registerInviter(t *testing.T, address, serviceKey string, privateKey ed2551
 	conn := dialClient(t, address)
 	// Request a challenge.
 	sendEnvelope(t, conn, protocol.Envelope{
-		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageRegisterInviter,
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessagePresenceRegister,
 		ServiceKey: serviceKey,
 	})
 	challenge := readEnvelope(t, conn)
-	if challenge.Type != protocol.MessageInviterChallenge || challenge.ChallengeNonce == "" {
+	if challenge.Type != protocol.MessagePresenceChallenge || challenge.ChallengeNonce == "" {
 		conn.Close()
 		t.Fatalf("inviter.challenge = %+v", challenge)
 	}
@@ -215,17 +178,17 @@ func registerInviter(t *testing.T, address, serviceKey string, privateKey ed2551
 		conn.Close()
 		t.Fatal(err)
 	}
-	signature, err := network.SignBytes(network.PurposeInviterRegistration, nonceBytes, privateKey)
+	signature, err := network.SignBytes(network.PurposePresence, nonceBytes, privateKey)
 	if err != nil {
 		conn.Close()
 		t.Fatal(err)
 	}
 	sendEnvelope(t, conn, protocol.Envelope{
-		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageRegisterInviter,
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessagePresenceRegister,
 		ServiceKey: serviceKey, ChallengeNonce: challenge.ChallengeNonce, ChallengeSignature: signature,
 	})
 	registered := readEnvelope(t, conn)
-	if registered.Type != protocol.MessageInviterRegistered || registered.RegistrationExpiresAt == "" {
+	if registered.Type != protocol.MessagePresenceRegistered || registered.RegistrationExpiresAt == "" {
 		conn.Close()
 		t.Fatalf("inviter.registered = %+v", registered)
 	}
@@ -319,98 +282,6 @@ func readFrameConn(t *testing.T, conn net.Conn) (byte, []byte) {
 		t.Fatalf("read payload: %v", err)
 	}
 	return op, payload
-}
-
-// TestSessionLifecycleEndToEnd opens two sessions with valid tickets, exchanges
-// a candidate from the first, and verifies the second receives it plus the
-// observed endpoint. Then both close cleanly.
-func TestSessionLifecycleEndToEnd(t *testing.T) {
-	address, cleanup := runServer(t)
-	defer cleanup()
-	now := time.Now().UTC()
-
-	// Agent A opens a session.
-	connA := dialClient(t, address)
-	defer connA.Close()
-	ticketA := testticket.Signed(t, now, "node-public-1", "net-1", "agent-a")
-	udpA := sendUDPProbe(t, address, ticketA)
-	sendEnvelope(t, connA, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion,
-		MinorVersion: protocol.MinorVersion,
-		Type:         protocol.MessageOpenSession,
-		Ticket:       &ticketA,
-	})
-	opened := readEnvelope(t, connA)
-	if opened.Type != protocol.MessageSessionOpened || opened.SessionID == "" {
-		t.Fatalf("agent A open = %+v", opened)
-	}
-
-	// Agent B opens; the node pairs them by shared network + distinct agent.
-	connB := dialClient(t, address)
-	defer connB.Close()
-	ticketB := testticket.Signed(t, now, "node-public-1", "net-1", "agent-b")
-	sendUDPProbe(t, address, ticketB)
-	sendEnvelope(t, connB, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion,
-		MinorVersion: protocol.MinorVersion,
-		Type:         protocol.MessageOpenSession,
-		Ticket:       &ticketB,
-	})
-	openedB := readEnvelope(t, connB)
-	if openedB.Type != protocol.MessageSessionOpened || openedB.SessionID == "" {
-		t.Fatalf("agent B open = %+v", openedB)
-	}
-
-	// A offers a candidate; B receives it plus A's observed endpoint.
-	candidate := network.Candidate{
-		Version:     network.WireVersion,
-		CandidateID: "cand-a-1",
-		SessionID:   opened.SessionID,
-		Key:         "agent-a",
-		Kind:        "host",
-		Transport:   "udp",
-		Address:     "192.0.2.10",
-		Port:        51820,
-		Priority:    100,
-		ExpiresAt:   now.Add(protocol.DefaultCandidateLifetime).Format(time.RFC3339Nano),
-	}
-	sendEnvelope(t, connA, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion,
-		MinorVersion: protocol.MinorVersion,
-		Type:         protocol.MessageOfferCandidate,
-		SessionID:    opened.SessionID,
-		Candidate:    &candidate,
-	})
-
-	// A first receives B's (empty) candidate list as a side effect of the push;
-	// B receives A's candidate. Read until B sees a non-empty candidate list.
-	_ = connB.SetReadDeadline(time.Now().Add(2 * time.Second))
-	var seen []network.Candidate
-	var observed *protocol.ObservedEndpoint
-	for i := 0; i < 5; i++ {
-		envelope := readEnvelope(t, connB)
-		if envelope.Type == protocol.MessageError {
-			t.Fatalf("B got error: %+v", envelope.Error)
-		}
-		if envelope.Type == protocol.MessageCandidates && len(envelope.Candidates) > 0 {
-			seen = envelope.Candidates
-			observed = envelope.Observed
-			break
-		}
-	}
-	if len(seen) == 0 {
-		t.Fatal("B never received A's candidate")
-	}
-	if seen[0].Address != "192.0.2.10" {
-		t.Fatalf("received candidate address = %q, want 192.0.2.10", seen[0].Address)
-	}
-	if observed == nil {
-		t.Fatal("candidate.list omitted observed endpoint")
-	}
-	if observed.Version != network.WireVersion || observed.Key != "agent-a" ||
-		observed.Transport != "udp" || observed.Address != udpA.IP.String() || observed.Port != uint16(udpA.Port) {
-		t.Fatalf("observed endpoint = %+v, want agent-a udp %s", observed, udpA)
-	}
 }
 
 func TestAppleInvitationSessionPinsAuthorizationAndExchangesCandidates(t *testing.T) {
@@ -695,75 +566,6 @@ func TestAppleInvitationCloseCancelsSessionState(t *testing.T) {
 	}
 }
 
-// TestOpenRejectsInvalidTicket proves the node never opens a session for an
-// unsigned or tampered ticket (HN-404 authorization boundary).
-func TestOpenRejectsInvalidTicket(t *testing.T) {
-	address, cleanup := runServer(t)
-	defer cleanup()
-	conn := dialClient(t, address)
-	defer conn.Close()
-
-	tampered := testticket.Signed(t, time.Now().UTC(), "node-public-1", "net-1", "a")
-	tampered.Key = "substituted" // breaks signature.
-	sendEnvelope(t, conn, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion,
-		MinorVersion: protocol.MinorVersion,
-		Type:         protocol.MessageOpenSession,
-		Ticket:       &tampered,
-	})
-	envelope := readEnvelope(t, conn)
-	if envelope.Type != protocol.MessageError {
-		t.Fatalf("expected error for tampered ticket, got %+v", envelope)
-	}
-	if envelope.Error.Code != "unauthorized" {
-		t.Fatalf("code = %q, want unauthorized", envelope.Error.Code)
-	}
-	if envelope.Error.Retryable {
-		t.Fatal("unauthorized must not be retryable")
-	}
-}
-
-func TestTicketReplayRejectedAndFreshReconnectAccepted(t *testing.T) {
-	address, cleanup := runServer(t)
-	defer cleanup()
-	now := time.Now().UTC()
-	first := testticket.SignedWithID(t, now, "node-public-1", "net-1", "a", "first")
-	sendUDPProbe(t, address, first)
-
-	conn := dialClient(t, address)
-	sendEnvelope(t, conn, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
-		Type: protocol.MessageOpenSession, Ticket: &first,
-	})
-	if opened := readEnvelope(t, conn); opened.Type != protocol.MessageSessionOpened {
-		t.Fatalf("first open = %+v", opened)
-	}
-	_ = conn.Close()
-
-	replayConn := dialClient(t, address)
-	defer replayConn.Close()
-	sendEnvelope(t, replayConn, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
-		Type: protocol.MessageOpenSession, Ticket: &first,
-	})
-	replayed := readEnvelope(t, replayConn)
-	if replayed.Type != protocol.MessageError || replayed.Error.Code != "replay_detected" {
-		t.Fatalf("replay = %+v, want replay_detected", replayed)
-	}
-
-	fresh := testticket.SignedWithID(t, now, "node-public-1", "net-1", "a", "fresh")
-	sendUDPProbe(t, address, fresh)
-	freshConn := dialClient(t, address)
-	defer freshConn.Close()
-	sendEnvelope(t, freshConn, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
-		Type: protocol.MessageOpenSession, Ticket: &fresh,
-	})
-	if opened := readEnvelope(t, freshConn); opened.Type != protocol.MessageSessionOpened {
-		t.Fatalf("fresh reconnect = %+v", opened)
-	}
-}
-
 // TestNoPayloadInvariantRejectsSmuggling proves the node rejects every shape of
 // application-payload or experimental message and never forwards it (HN-404).
 func TestNoPayloadInvariantRejectsSmuggling(t *testing.T) {
@@ -826,8 +628,8 @@ func TestNoPayloadInvariantRejectsSmuggling(t *testing.T) {
 			wantCode: "bad_request",
 		},
 		{
-			name:     "inviter.register with smuggled payload",
-			payload:  []byte(`{"majorVersion":1,"minorVersion":0,"type":"inviter.register","serviceKey":"k","payload":"secret-data"}`),
+			name:     "presence.register with smuggled payload",
+			payload:  []byte(`{"majorVersion":1,"minorVersion":0,"type":"presence.register","serviceKey":"k","payload":"secret-data"}`),
 			wantCode: "bad_request",
 		},
 	}
@@ -849,115 +651,6 @@ func TestNoPayloadInvariantRejectsSmuggling(t *testing.T) {
 				t.Fatalf("%s: error echoed smuggled payload: %s", test.name, body)
 			}
 		})
-	}
-}
-
-// TestRateLimitRejectsBurst proves the node bounds per-connection message rate
-// (HN-403). Sending faster than the configured ceiling yields rate_limited.
-func TestRateLimitRejectsBurst(t *testing.T) {
-	// Lower the rate so the test does not have to flood the wire.
-	lowered := func(cfg *config.Config) {
-		cfg.Limits.MessagesPerSecond = 5
-	}
-	address, cleanup := runServer(t, lowered)
-	defer cleanup()
-	conn := dialClient(t, address)
-	defer conn.Close()
-
-	// Open a valid session first so subsequent offers are processed rather than
-	// closing the connection. We then flood candidate.offer messages beyond the
-	// per-connection cap; the limiter must reject at least one.
-	now := time.Now().UTC()
-	ticket := testticket.Signed(t, now, "node-public-1", "net-1", "a")
-	sendUDPProbe(t, address, ticket)
-	sendEnvelope(t, conn, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion,
-		MinorVersion: protocol.MinorVersion,
-		Type:         protocol.MessageOpenSession,
-		Ticket:       &ticket,
-	})
-	opened := readEnvelope(t, conn)
-	if opened.Type != protocol.MessageSessionOpened {
-		t.Fatalf("open = %+v", opened)
-	}
-
-	rejected := false
-	for i := 0; i < 50; i++ {
-		// candidate.offer with no peer yet returns not_matched; that still
-		// consumes rate budget, which is exactly what we want to exhaust.
-		sendEnvelope(t, conn, protocol.Envelope{
-			MajorVersion: protocol.MajorVersion,
-			MinorVersion: protocol.MinorVersion,
-			Type:         protocol.MessageOfferCandidate,
-			SessionID:    opened.SessionID,
-			Candidate: &network.Candidate{
-				Version:     network.WireVersion,
-				CandidateID: "c",
-				SessionID:   opened.SessionID,
-				Key:         "agent-a",
-				Kind:        "host",
-				Transport:   "udp",
-				Address:     "192.0.2.1",
-				Port:        5000,
-				ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339Nano),
-			},
-		})
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	for i := 0; i < 50; i++ {
-		op, payload := readFrameConn(t, conn)
-		if op != 0x1 {
-			break
-		}
-		var envelope protocol.Envelope
-		if err := json.Unmarshal(payload, &envelope); err != nil {
-			break
-		}
-		if envelope.Type == protocol.MessageError && envelope.Error.Code == "rate_limited" {
-			rejected = true
-			break
-		}
-	}
-	if !rejected {
-		t.Fatal("never observed a rate_limited response despite burst over the cap")
-	}
-}
-
-// TestHealthReflectsSessionCount verifies the /healthz session counter tracks
-// opens and closes.
-func TestHealthReflectsSessionCount(t *testing.T) {
-	address, cleanup := runServer(t)
-	defer cleanup()
-
-	healthBefore := fetchHealth(t, address)
-	if healthBefore.Sessions != 0 {
-		t.Fatalf("initial sessions = %d, want 0", healthBefore.Sessions)
-	}
-
-	now := time.Now().UTC()
-	conn := dialClient(t, address)
-	defer conn.Close()
-	ticket := testticket.Signed(t, now, "node-public-1", "net-1", "a")
-	sendUDPProbe(t, address, ticket)
-	sendEnvelope(t, conn, protocol.Envelope{
-		MajorVersion: protocol.MajorVersion,
-		MinorVersion: protocol.MinorVersion,
-		Type:         protocol.MessageOpenSession,
-		Ticket:       &ticket,
-	})
-	_ = readEnvelope(t, conn) // session.opened
-
-	// The counter update races with the read loop; poll briefly.
-	var after snapshot
-	for i := 0; i < 20; i++ {
-		after = fetchHealth(t, address)
-		if after.Sessions == 1 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if after.Sessions != 1 {
-		t.Fatalf("sessions after open = %d, want 1", after.Sessions)
 	}
 }
 
@@ -1198,4 +891,61 @@ func TestInviterSideRequiresRegistrationConnection(t *testing.T) {
 	if rejected := readEnvelope(t, impostor); rejected.Type != protocol.MessageError || rejected.Error.Code != "unauthorized" {
 		t.Fatalf("impostor inviter open = %+v, want unauthorized", rejected)
 	}
+}
+
+// TestRateLimitRejectsBurst proves the node bounds per-connection message rate. Sending faster than the configured
+// ceiling yields rate_limited; every message, even one the node refuses, spends the budget.
+func TestRateLimitRejectsBurst(t *testing.T) {
+	address, cleanup := runServer(t, func(cfg *config.Config) { cfg.Limits.MessagesPerSecond = 5 })
+	defer cleanup()
+	conn := dialClient(t, address)
+	defer conn.Close()
+	for i := 0; i < 50; i++ {
+		sendEnvelope(t, conn, protocol.Envelope{
+			MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
+			Type: protocol.MessageLinkClose, LinkID: "burst",
+		})
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 50; i++ {
+		envelope := readEnvelope(t, conn)
+		if envelope.Type == protocol.MessageError && envelope.Error.Code == "rate_limited" {
+			return
+		}
+	}
+	t.Fatal("never observed a rate_limited response despite burst over the cap")
+}
+
+// TestHealthReflectsSessionCount verifies the /healthz session counter tracks an invitation session.
+func TestHealthReflectsSessionCount(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	if before := fetchHealth(t, address); before.Sessions != 0 {
+		t.Fatalf("initial sessions = %d, want 0", before.Sessions)
+	}
+	now := time.Now().UTC()
+	code, digest, invitingAgent, inviterPrivate := signedAppleInvitation(t, now)
+	inviter := registerInviter(t, address, invitingAgent, inviterPrivate)
+	defer inviter.Close()
+	probe := protocol.InvitationUDPProbe{
+		Version: 1, InvitationCode: code, Key: "joiner-key", TokenDigest: digest, TransactionID: "transaction",
+	}
+	sendInvitationUDPProbe(t, address, probe)
+	conn := dialClient(t, address)
+	defer conn.Close()
+	sendEnvelope(t, conn, protocol.Envelope{
+		MajorVersion: 1, MinorVersion: 0, Type: protocol.MessageOpenSession,
+		InvitationCode: code, Key: "joiner-key", TokenDigest: digest, TransactionID: "transaction",
+	})
+	if opened := readEnvelope(t, conn); opened.Type != protocol.MessageSessionOpened {
+		t.Fatalf("open = %+v", opened)
+	}
+	var after snapshot
+	for i := 0; i < 20; i++ {
+		if after = fetchHealth(t, address); after.Sessions == 1 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("sessions after open = %d, want 1", after.Sessions)
 }

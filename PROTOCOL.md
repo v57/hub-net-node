@@ -1,7 +1,7 @@
-# Hub Network rendezvous protocol v1.0
+# Hub Network rendezvous protocol
 
 `hub-net-node` is a coordination service, never a WireGuard peer or application
-traffic relay. Version 1 advertises exactly one role: `rendezvous`.
+traffic relay. It advertises exactly one role: `rendezvous`.
 
 ## Negotiation
 
@@ -9,75 +9,110 @@ The server advertises major/minor version, roles, and effective limits. A
 different major version is rejected. A client may use a supported minor version
 and must ignore unknown optional fields. Initial limits are:
 
-- 16 concurrent sessions per authenticated agent;
-- 16 candidates per session;
+- 16 concurrent links (and invitation sessions) per device;
+- 16 candidates per link;
 - 16 KiB per coordination message;
 - 20 messages per second per connection;
-- two-minute session lifetime;
+- one-minute link setup and two-minute session lifetime;
 - 30-second candidate lifetime; and
-- two-minute online inviter registration lease.
+- two-minute presence lease.
 
 Operators may lower limits. Raising them is a deployment choice but does not
 change the protocol.
 
-## Session lifecycle
+## Trust
 
-1. An agent sends one UDP probe to the node's WebSocket port using the
-   `UDPProbe` JSON shape: wire `version` plus a valid, unexpired Hub
-   rendezvous `ticket`. The datagram must originate from the same local UDP
-   socket/port that WireGuard will use.
-2. The node verifies the ticket, records only the datagram source address and
-   port until ticket expiry, and acknowledges `version` plus `ticketId`. It
-   never returns the observed address to the probing agent.
-3. The agent sends `session.open` over WebSocket with that same ticket. A
-   missing, expired, or differently bound UDP observation fails with
-   `udp_observation_required`.
-4. The node creates an opaque, unpredictable session ID and replies with
-   `session.opened`.
-5. Agents submit bounded `candidate.offer` messages. Each candidate is tied to
-   its ticket identity and session and expires after the advertised lifetime.
-6. The node returns `candidate.list` coordination data to the matched peer.
-   `observedEndpoint` contains the node-measured UDP mapping, is bound to the
-   peer `key`, and remains distinct from declared candidates.
-7. Either agent may send `session.close`; otherwise expiry removes the session
-   and retained endpoints.
+The node introduces two devices and helps them find a direct UDP path; it never
+decides who may talk. Every grant it checks is checked again, and authoritatively,
+by the device it is delivered to: against the hub key that device pinned when it
+joined, its own key and its own list of admitted devices. WireGuard keys reach a
+device only inside hub-signed grants, never from the node. A compromised node can
+withhold or delay introductions, hand out wrong endpoints and see addresses: denial
+of service and address exposure, never access.
 
-## Online inviter registry
+## Presence
 
-An agent that can issue compact invitations registers itself so joins are routed
-to a currently present inviter. Registration is keyed by the agent's service
-public key (the base64 SPKI Ed25519 key that signs its invitations) and proves
-possession of the matching private key through a signed challenge.
+Every device that wants to be reachable keeps one WebSocket to the node and
+registers on it. Registration is keyed by the device's service public key (the
+base64 SPKI Ed25519 key its hub profile is bound to) and proves possession of the
+matching private key through a signed challenge.
 
-1. The agent opens a WebSocket to the rendezvous endpoint and sends
-   `inviter.register` carrying only its `serviceKey`. The node replies
-   `inviter.challenge` with a random `challengeNonce` (16 bytes, unpadded
-   base64url).
-2. The agent signs the raw nonce bytes under the
-   `hub-network/inviter-registration/v1` domain and resends `inviter.register`
-   with `serviceKey`, `challengeNonce`, and `challengeSignature`.
-3. The node verifies the signature against the raw 32-byte service public key.
-   On success it replies `inviter.registered` with a `registrationExpiresAt`
-   lease (two minutes by default). The nonce is single-use: it cannot be replayed.
-4. While the connection stays open and the lease is live, the inviter is
-   considered online. Disconnect or lease expiry drops the registration; the
-   agent re-runs the challenge to re-register.
+1. The device sends `presence.register` carrying only its `serviceKey`. The node
+   replies `presence.challenge` with a random `challengeNonce` (16 bytes,
+   unpadded base64url).
+2. The device signs the raw nonce bytes under the `hub-network/presence/v1`
+   domain and resends `presence.register` with `serviceKey`, `challengeNonce`
+   and `challengeSignature`.
+3. The node verifies the signature against the raw 32-byte public key and replies
+   `presence.registered` with a `registrationExpiresAt` lease (two minutes by
+   default). The nonce is single-use.
+4. The device renews by repeating the challenge on the same connection before
+   the lease ends. Disconnect or lease expiry drops the registration
+   (`presence.unregistered` when the node can still tell it).
 
-A joiner's `session.open` carrying an invitation is rejected with a
-non-retryable `unauthorized` (`inviter offline`) unless the invitation's signing
-key is currently registered. This routes joins to a live inviter without the
-node relaying any application traffic; the no-payload invariant still holds.
+A present device can be the target of links and, when it issued them, of
+invitations. Presence state is in-memory; a node restart clears it and devices
+register again.
 
-Registration state is in-memory and process-local; a node restart clears it and
-inviters re-register. A registration lease is swept on the same cadence as
-sessions and UDP observations.
+## Peer links
+
+A peer link is one direct WireGuard path between two devices of one hub, named by
+a hub-signed `PeerLinkGrant`:
+
+```
+{version, grantId, hubKey, hubNetworkId, purpose,
+ a: {key, wireGuardKey, member, addresses[]},
+ b: {key, wireGuardKey, member, addresses[]},
+ aViaB: [cidr], bViaA: [cidr],          routes each side sends through the other
+ aToB: [{protocol, port}], bToA: [...], ports each side may open on the other
+ issuedAt, expiresAt, signature}
+```
+
+signed by `hubKey` under `hub-network/peer-link/v1` over the canonical JSON
+without `signature`, lifetime at most 31 days. `purpose` is `hub` (a member and
+the hub's machine: the member routes the machine's overlay addresses through it
+and may open the hub's port), `gateway` (adds `0.0.0.0/0` and `::/0`) or `share`.
+
+1. Both devices are present. Either side sends `link.open` with the grant; its
+   registered `serviceKey` must be `a.key` or `b.key`. The node checks the
+   signature against the grant's own `hubKey`, the lifetime and that the other
+   side is present (else retryable `peer_offline`). One live link exists per
+   (hubKey, grantId): a new open replaces the old one.
+2. The node replies `link.opened` with an unpredictable `linkId`, the opener's
+   `probeToken` and the target's key as `peerKey`, and pushes `link.incoming`
+   to the target with the `linkId`, the `grant`, the opener as `peerKey` and the
+   target's own `probeToken`.
+3. The target verifies the grant itself and answers `link.accept` or
+   `link.reject`. A rejection closes the link (`link.closed` to the opener).
+4. Each side sends a `LinkUDPProbe` `{version, linkId, probeToken}` to the node's
+   WebSocket port from the same UDP socket WireGuard uses, repeating it every
+   second until the link is ready. The node records only the datagram source and
+   acknowledges `{version, linkId}`.
+5. Each side may send `link.offer` with the `linkId` and up to 16
+   `{address, port}` host candidates (LAN, global IPv6).
+6. Once the target accepted and both sides were observed, the node pushes
+   `link.ready` to both: the `linkId`, the other side as `peerKey`, its
+   node-observed endpoint as `observedEndpoint`, its declared `candidates` and a
+   `punchAt` time about a second ahead. Later offers push `link.ready` again.
+7. At `punchAt` both devices set the other as a WireGuard peer, with the
+   endpoint to try, and WireGuard's own handshakes open the NAT mappings from
+   both ends. A device tries the observed endpoint, then each candidate, until a
+   handshake completes.
+8. Either side may send `link.close`. Setup must finish within 60 seconds; a ready
+   link record is dropped two minutes after it became ready, since the devices
+   hold the path themselves from then on.
+
+No endpoint or candidate of either side is disclosed before the target accepts.
+A device may have 16 links at once; a target receives at most 10 link openings a
+minute.
 
 ## Invitation bootstrap signaling
 
-The joiner opens its invitation session first in the client-initiated flow.
-After the node verifies the compact invitation, confirms the signing inviter is
-online, consumes the joiner's replay entry, and opens the joiner session, it
-pushes `inviter.bootstrap` to the registered inviter's connection:
+Invitations are the first-contact credential, for a device that has no grant yet.
+The joiner opens its invitation session first. After the node verifies the compact
+invitation, confirms the signing inviter is present, consumes the joiner's replay
+entry, and opens the joiner session, it pushes `inviter.bootstrap` to the inviter's
+presence connection:
 
 - `invitationCode` (the compact code the joiner presented, so the inviter can
   probe and open its own side without retaining invitation state);
@@ -86,7 +121,7 @@ pushes `inviter.bootstrap` to the registered inviter's connection:
   exact transaction identity the joiner used).
 
 The inviter then runs the same authenticated UDP probe and `session.open`
-(invitation form) on its registration connection, offering its declared
+(invitation form) on its presence connection, offering its declared
 `candidate.offer` messages. The node pairs the two sessions in either arrival
 order: the first opener may be the inviter or the joiner, and the second must
 complete the exact (inviter, joiner) pair for the invitation (same token digest,
@@ -100,34 +135,31 @@ The inviter's own `session.open` for an invitation never triggers a second
 coordination data only; the direct bootstrap request/response exchange happens
 between the joiner and the inviter outside this connection.
 
-## Ticket replay state
+## Replay state
 
-After complete signature, purpose, binding, issue-time, expiry, maximum-lifetime,
-and clock-skew validation, successful `session.open` atomically consumes its
-Hub-scoped `ticketId`. Reuse returns `replay_detected`; reconnect requires a
-freshly issued ticket. Consumed IDs remain only until signed ticket expiry.
+An invitation can be used once: the joiner's `session.open` atomically consumes a
+slot keyed by the invitation's payload digest. Reuse returns `replay_detected`.
+Consumed entries stay only until the invitation expires.
 
-Replay memory is bounded to 16,384 entries globally and 256 entries per source
-IP and swept with other short-lived coordination state. Capacity pressure fails
-closed. State is process-local: restart clears it, while the ten-minute maximum
-ticket lifetime bounds the remaining replay window. Multi-replica deployments,
-or deployments requiring strict cross-restart rejection, MUST provide shared
-replay state or deterministically route each ticket to one replay authority.
+Replay memory is bounded to 16,384 entries globally and 256 per source IP and
+swept with other short-lived coordination state. Capacity pressure fails closed.
+State is process-local: a restart clears it, and the invitation lifetime bounds the
+remaining window. Multi-replica deployments MUST share replay state.
 
-Authenticated UDP observations use matching bounds: 16,384 globally and 256
-per source IP. They are keyed by Hub key plus ticket ID, expire with tickets,
-and are swept periodically even when no session consumes them.
+Authenticated UDP observations use the same bounds. They are keyed by link and
+side (or invitation digest and key), expire with the link or invitation, and are
+swept periodically.
 
-For endpoint-dependent NAT, mapping observed toward the node can differ from
-mapping toward the peer. Direct checks therefore fail within bounded timeout;
-the node provides no relay fallback.
+For endpoint-dependent NAT, the mapping observed toward the node can differ from
+the mapping toward the peer. The direct path then fails within the setup time; the
+node provides no relay fallback.
 
 ## No-payload invariant
 
 The envelope has no payload, packet, stream, forwarding, destination-port, or
 arbitrary byte field. Unknown JSON fields are discarded and are never forwarded.
-Only typed ticket, session, candidate, capability, and error fields can be
-emitted. Oversized messages and unsupported message types are rejected before
+Only typed presence, grant, link, session, candidate, capability, and error
+fields can be emitted. A grant is forwarded only to the device it names. Oversized messages and unsupported message types are rejected before
 session handling.
 # Production release boundary
 

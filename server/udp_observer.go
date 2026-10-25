@@ -52,10 +52,6 @@ func newUDPObservationsWithLimits(max, perSource int) *udpObservations {
 	}
 }
 
-func udpObservationKey(ticket network.RendezvousTicket) string {
-	return ticket.HubKey + "\x00" + ticket.TicketID
-}
-
 // invitationObservationKey namespaces UDP observations for compact-invitation
 // bootstrap by the exact payload digest and the opener's service key. Unlike
 // legacy hub-signed rendezvous tickets, an invitation has no hub key, so the
@@ -63,10 +59,6 @@ func udpObservationKey(ticket network.RendezvousTicket) string {
 // placeholder.
 func invitationObservationKey(digest, agentKey string) string {
 	return "invitation:" + digest + "\x00" + agentKey
-}
-
-func (o *udpObservations) put(ticket network.RendezvousTicket, address *net.UDPAddr, expiresAt, now time.Time) bool {
-	return o.putKey(udpObservationKey(ticket), ticket.Key, address, expiresAt, now)
 }
 
 func (o *udpObservations) putKey(key, agentKey string, address *net.UDPAddr, expiresAt, now time.Time) bool {
@@ -101,10 +93,6 @@ func (o *udpObservations) putKey(key, agentKey string, address *net.UDPAddr, exp
 		source:    source,
 	}
 	return true
-}
-
-func (o *udpObservations) get(ticket network.RendezvousTicket, now time.Time) (protocol.ObservedEndpoint, bool) {
-	return o.getKey(udpObservationKey(ticket), ticket.Key, now)
 }
 
 func (o *udpObservations) getKey(key, agentKey string, now time.Time) (protocol.ObservedEndpoint, bool) {
@@ -181,6 +169,15 @@ func (s *Server) serveUDPObservations(ctxDone <-chan struct{}, conn *net.UDPConn
 			continue
 		}
 		now := time.Now()
+		// A link probe: the side's own token names the link and the side
+		if linkID, endpoint, ok := s.verifyLinkUDPProbe(buffer[:n], address); ok {
+			if observed, known := s.links.Observe(linkID, endpoint.token, endpoint.endpoint); known {
+				response, _ := json.Marshal(protocol.LinkUDPProbeResponse{Version: network.WireVersion, LinkID: linkID})
+				_ = reply.write(response, address, local)
+				s.pushReadyIfReady(observed)
+			}
+			continue
+		}
 		// Compact-invitation probes carry no hub ticket; they are recorded
 		// under a digest-scoped observation key and acknowledged with the
 		// canonical ticket id the inviter/joiner clients expect.
@@ -195,29 +192,29 @@ func (s *Server) serveUDPObservations(ctxDone <-chan struct{}, conn *net.UDPConn
 			}
 			continue
 		}
-		ticket, ok := s.verifyUDPProbe(buffer[:n], now)
-		if !ok {
-			continue
-		}
-		expiresAt, _ := time.Parse(time.RFC3339Nano, ticket.ExpiresAt)
-		if !s.udpObserved.put(ticket, address, expiresAt, now) {
-			continue
-		}
-		response, _ := json.Marshal(protocol.UDPProbeResponse{
-			Version: network.WireVersion, TicketID: ticket.TicketID,
-		})
-		_ = reply.write(response, address, local)
 	}
 }
 
-func (s *Server) verifyUDPProbe(payload []byte, now time.Time) (network.RendezvousTicket, bool) {
-	var ticketProbe protocol.UDPProbe
+type linkObservation struct {
+	token    string
+	endpoint network.ObservedEndpoint
+}
+
+// verifyLinkUDPProbe reads a link probe; the store decides whether its token is live. The datagram source is the
+// observation, never anything the probe claims.
+func (s *Server) verifyLinkUDPProbe(payload []byte, address *net.UDPAddr) (string, linkObservation, bool) {
+	var probe protocol.LinkUDPProbe
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&ticketProbe) == nil && ticketProbe.Version == network.WireVersion && s.tickets.Verify(ticketProbe.Ticket) == nil {
-		return ticketProbe.Ticket, true
+	if decoder.Decode(&probe) != nil || probe.Version != network.WireVersion || probe.LinkID == "" || probe.ProbeToken == "" {
+		return "", linkObservation{}, false
 	}
-	return network.RendezvousTicket{}, false
+	return probe.LinkID, linkObservation{
+		token: probe.ProbeToken,
+		endpoint: network.ObservedEndpoint{
+			Version: network.WireVersion, Transport: "udp", Address: address.IP.String(), Port: uint16(address.Port),
+		},
+	}, true
 }
 
 // verifyInvitationUDPProbe authenticates a compact-invitation probe and

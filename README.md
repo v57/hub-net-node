@@ -2,16 +2,19 @@
 
 Self-hostable Hub Network rendezvous node. A coordination service, never a
 WireGuard peer or application traffic relay. The first release advertises
-exactly one role: `rendezvous`. Agents use it to exchange endpoint candidates
-and perform NAT traversal after a Hub-signed ticket; application packets then
-travel directly between agents over WireGuard and never traverse the node.
+exactly one role: `rendezvous`. Devices keep presence on it, and it introduces
+two devices that hold a hub-signed peer link grant so they can punch a direct
+path; application packets then travel directly between them over WireGuard and
+never traverse the node. Each device checks the grant itself: the node decides
+nothing.
 
 See [`PROTOCOL.md`](PROTOCOL.md) for the wire contract and no-payload
 invariant.
 
 ## Status
 
-Ticket verification, bounded rendezvous sessions, candidate exchange,
+Presence, targeted peer links (grant check, accept gate, probes, link.ready),
+invitation bootstrap sessions, candidate exchange,
 rate/retention limits, strict no-payload validation, and deployment assets are
 implemented. `/healthz` reports protocol capabilities and live session count;
 `/rendezvous` serves the WebSocket coordination protocol.
@@ -83,14 +86,15 @@ Production binary accepts flags:
   -log-json
 ```
 
-Version 1 deliberately uses `admissionPolicy: open`: any self-hosted Hub may
-present a self-contained signed ticket. Signature validation proves ticket
-integrity and binding only; it is not operator trust or Sybil resistance.
+The node deliberately uses `admissionPolicy: open`: any self-hosted hub's devices
+may present a self-contained signed grant. Signature validation proves grant
+integrity only; it is not operator trust or Sybil resistance, and devices never
+rely on it.
 `-max-connections` (default 256) and `-max-connections-per-source` (default 16)
 therefore bound sockets independently of attacker-rotatable Hub and agent keys.
 HTTP headers are capped at 8 KiB and incomplete handshakes expire after 10
 seconds. Authenticated UDP observations are capped at 16,384 globally and 256
-per source IP, then swept at ticket expiry. Deploy behind a source-preserving
+per source IP, then swept when their link or invitation ends. Deploy behind a source-preserving
 reverse proxy; otherwise TCP limits see the proxy address. Private deployments
 needing Hub allowlists must add an external admission proxy until a trusted-Hub
 policy is implemented.
@@ -135,8 +139,9 @@ them is a deployment choice that does not change the wire protocol.
 
 The node is **not trusted with application data or authorization**. It:
 
-- validates Hub-signed rendezvous tickets without prior Hub registration
-  (HN-401);
+- checks hub-signed peer link grants without prior hub registration, as an
+  abuse gate only, and forwards a grant only to the device it names;
+- releases no endpoint of either side before the target accepts;
 - reports observed UDP endpoints separately from client-declared candidates;
 - never treats a candidate as an authorization grant;
 - accepts only bounded, typed coordination fields; unknown JSON fields are

@@ -25,6 +25,8 @@ import (
 	"github.com/v57/hub-net-node/health"
 	"github.com/v57/hub-net-node/invitation"
 	"github.com/v57/hub-net-node/limiter"
+	"github.com/v57/hub-net-node/link"
+	"github.com/v57/hub-net-node/linkgrant"
 	"github.com/v57/hub-net-node/logging"
 	network "github.com/v57/hub-net-node/models"
 	"github.com/v57/hub-net-node/protocol"
@@ -60,7 +62,8 @@ type Server struct {
 	logger       *slog.Logger
 	capabilities protocol.Capabilities
 	reporter     *health.Reporter
-	tickets      ticket.Verifier
+	grants       linkgrant.Verifier
+	links        *link.Store
 	replays      *ticket.ReplayCache
 	sessions     *session.Store
 	udpObserved  *udpObservations
@@ -102,7 +105,7 @@ func New(options Options) (*Server, error) {
 		logger:        logger,
 		capabilities:  capabilities,
 		reporter:      reporter,
-		tickets:       ticket.Verifier{NodeID: cfg.NodeID},
+		links:         link.New(link.Options{}),
 		replays:       ticket.NewReplayCache(ticket.DefaultReplayCapacity, ticket.DefaultReplayPerSource, nil),
 		sessions:      sessions,
 		udpObserved:   newUDPObservations(),
@@ -134,12 +137,6 @@ func (s *Server) Reporter() *health.Reporter { return s.reporter }
 
 // Config returns the resolved node configuration.
 func (s *Server) Config() config.Config { return s.cfg }
-
-// VerifyTicket authenticates one self-contained Hub ticket and enforces this
-// deployment's node binding. No Hub allowlist or prior registration is used.
-func (s *Server) VerifyTicket(value network.RendezvousTicket) error {
-	return s.tickets.Verify(value)
-}
 
 // ActualAddress returns the bound address once Run has accepted a listener.
 // Empty before Run.
@@ -290,7 +287,14 @@ func (s *Server) runSweepLoop(ctx context.Context, stopped chan struct{}) {
 			s.replays.Sweep()
 			s.udpObserved.sweep(time.Now())
 			for _, key := range s.registry.SweepExpired() {
-				s.logger.Info("inviter registration expired", "key", keyTag(key))
+				s.logger.Info("presence expired", "key", keyTag(key))
+				s.closeLinksOf(key)
+			}
+			for _, expired := range s.links.Sweep() {
+				// A link that never got ready tells its sides; a ready one is held by the devices themselves
+				if expired.ReadyAt.IsZero() {
+					s.pushLinkClosed(expired, "", "link_expired", "the link was not ready in time")
+				}
 			}
 			for i := 0; i < removed; i++ {
 				s.reporter.DecrementSessions()
@@ -354,7 +358,10 @@ func (s *Server) serveRendezvous(ctx context.Context, state *connState) {
 		}
 		if state.serviceKey != "" {
 			dropped := s.registry.Disconnect(state.serviceKey, state)
-			s.logger.Info("inviter connection closed", "key", keyTag(state.serviceKey), "from", state.source, "registrationDropped", dropped)
+			s.logger.Info("presence connection closed", "key", keyTag(state.serviceKey), "from", state.source, "registrationDropped", dropped)
+			if dropped {
+				s.closeLinksOf(state.serviceKey)
+			}
 		}
 	}()
 
@@ -402,9 +409,9 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 	}
 
 	switch envelope.Type {
-	case protocol.MessageRegisterInviter:
-		// A registered inviter renews its lease on its own connection, also while one of its bootstrap sessions is
-		// open; a connection that opened a plain session can't become an inviter.
+	case protocol.MessagePresenceRegister:
+		// A present device renews its lease on its own connection, also while one of its bootstrap sessions is
+		// open; a connection that opened a joiner session can't register.
 		if state.sessionID != "" && state.serviceKey != envelope.ServiceKey {
 			s.writeError(state, "bad_request", "session open on registering connection", false)
 			return false
@@ -421,7 +428,7 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			state.challenge = challenge
 			s.writeEnvelope(state, protocol.Envelope{
 				MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
-				Type: protocol.MessageInviterChallenge, RequestID: envelope.RequestID,
+				Type: protocol.MessagePresenceChallenge, RequestID: envelope.RequestID,
 				ServiceKey: envelope.ServiceKey, ChallengeNonce: challenge.Nonce,
 			})
 			return false
@@ -437,20 +444,19 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 		if state.serviceKey != "" && !renewed {
 			s.registry.Disconnect(state.serviceKey, state)
 		}
-		s.logger.Info("inviter registered", "key", keyTag(envelope.ServiceKey), "from", state.source, "renewed", renewed,
+		s.logger.Info("presence registered", "key", keyTag(envelope.ServiceKey), "from", state.source, "renewed", renewed,
 			"expiresAt", expiry.UTC().Format(time.RFC3339))
 		state.serviceKey = envelope.ServiceKey
-		// Bind a write callback so the node can push bootstrap requests to
-		// this connection.
+		// Bind a write callback so the node can push bootstrap requests and links to this connection.
 		s.registry.Bind(envelope.ServiceKey, state, func(reply protocol.Envelope) { s.writeEnvelope(state, reply) })
 		s.writeEnvelope(state, protocol.Envelope{
 			MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
-			Type: protocol.MessageInviterRegistered, RequestID: envelope.RequestID,
+			Type: protocol.MessagePresenceRegistered, RequestID: envelope.RequestID,
 			ServiceKey: envelope.ServiceKey, RegistrationExpiresAt: expiry.UTC().Format(time.RFC3339Nano),
 		})
 		return false
 	case protocol.MessageOpenSession:
-		if envelope.InvitationCode != "" {
+		{
 			if state.sessionID != "" {
 				s.writeError(state, "bad_request", "session already open", false)
 				return false
@@ -561,7 +567,6 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			}
 			s.logger.Info("session opened joiner", "session", id)
 			state.sessionID = id
-			state.ticket = bootstrapTicket
 			s.reporter.IncrementSessions()
 			s.registerPeer(id, func(reply protocol.Envelope) { s.writeEnvelope(state, reply) })
 			s.writeEnvelope(state, protocol.Envelope{
@@ -575,65 +580,6 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			s.pushToPeer(id)
 			return false
 		}
-		rendezvousTicket := *envelope.Ticket
-		if err := s.tickets.Verify(rendezvousTicket); err != nil {
-			s.logger.Info("ticket rejected", "from", state.source, "key", keyTag(rendezvousTicket.Key), "reason", err.Error())
-			s.writeError(state, "unauthorized", "ticket rejected", false)
-			return false
-		}
-		if state.sessionID != "" {
-			s.writeError(state, "bad_request", "session already open", false)
-			return false
-		}
-		observed, ok := s.udpObserved.get(rendezvousTicket, time.Now())
-		s.logger.Info("session.open ticket", "from", state.source, "ticket", short(rendezvousTicket.TicketID), "observed", ok)
-		if !ok {
-			s.writeError(state, "udp_observation_required", "authenticated UDP probe required before session.open", true)
-			return false
-		}
-		expiresAt, err := time.Parse(time.RFC3339Nano, rendezvousTicket.ExpiresAt)
-		if err != nil {
-			s.logger.Info("ticket rejected", "from", state.source, "key", keyTag(rendezvousTicket.Key), "reason", "unreadable expiry")
-			s.writeError(state, "unauthorized", "ticket rejected", false)
-			return false
-		}
-		replayKey := rendezvousTicket.HubKey + "\x00" + rendezvousTicket.TicketID
-		if err := s.replays.Consume(replayKey, state.source, expiresAt); err != nil {
-			code := "replay_detected"
-			retryable := false
-			if errors.Is(err, ticket.ErrReplayCapacity) {
-				code = "capacity_exceeded"
-				retryable = true
-			}
-			s.writeError(state, code, err.Error(), retryable)
-			return false
-		}
-		id, err := s.sessions.Open(rendezvousTicket, observed)
-		if err != nil {
-			s.replays.Release(replayKey)
-			s.writeError(state, errorCode(err), err.Error(), errors.Is(err, session.ErrSessionLimitExceeded))
-			return false
-		}
-		state.sessionID = id
-		state.ticket = rendezvousTicket
-		s.reporter.IncrementSessions()
-		// Register this connection so the matched peer's offers can push
-		// candidate updates here. writeEnvelope holds the per-connection write
-		// lock, so concurrent writes from a peer-push goroutine are safe.
-		s.registerPeer(id, func(envelope protocol.Envelope) { s.writeEnvelope(state, envelope) })
-		s.writeEnvelope(state, protocol.Envelope{
-			MajorVersion: protocol.MajorVersion,
-			MinorVersion: protocol.MinorVersion,
-			Type:         protocol.MessageSessionOpened,
-			RequestID:    envelope.RequestID,
-			SessionID:    id,
-		})
-		// If a peer was already waiting, deliver its candidates now.
-		s.deliverPeerCandidates(state)
-		// Deliver this opener's candidates and observed endpoint to the
-		// waiting peer as well, so the match is symmetric.
-		s.pushToPeer(id)
-		return false
 
 	case protocol.MessageOfferCandidate:
 		if state.sessionID == "" {
@@ -667,6 +613,11 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			return false
 		}
 		return true
+
+	case protocol.MessageLinkOpen, protocol.MessageLinkAccept, protocol.MessageLinkReject,
+		protocol.MessageLinkOffer, protocol.MessageLinkClose:
+		s.processLink(state, envelope)
+		return false
 
 	default:
 		// Validate already rejected unknown types; defensive double check.
@@ -843,6 +794,16 @@ func errorCode(err error) string {
 		return "unauthorized"
 	case errors.Is(err, registry.ErrCapacityExceeded):
 		return "capacity_exceeded"
+	case errors.Is(err, link.ErrNotFound):
+		return "link_not_found"
+	case errors.Is(err, link.ErrNotSide), errors.Is(err, link.ErrNotTarget):
+		return "unauthorized"
+	case errors.Is(err, link.ErrLinkLimit):
+		return "link_limit_exceeded"
+	case errors.Is(err, link.ErrRateLimited):
+		return "rate_limited"
+	case errors.Is(err, link.ErrCandidates):
+		return "candidate_limit_exceeded"
 	default:
 		return "internal_error"
 	}
@@ -854,10 +815,9 @@ type connState struct {
 	writeMu    sync.Mutex
 	limiter    *limiter.RateLimiter
 	sessionID  string
-	ticket     network.RendezvousTicket
 	source     string
 	serviceKey string
-	// challenge is the inviter-registration nonce issued to this connection.
+	// challenge is the presence nonce issued to this connection.
 	challenge registry.Challenge
 }
 

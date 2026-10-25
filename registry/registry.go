@@ -145,7 +145,7 @@ func (r *Registry) Register(serviceKey string, challenge Challenge, signature st
 	if err != nil {
 		return time.Time{}, ErrInvalidSignature
 	}
-	input, err := network.SignatureInputForBytes(network.PurposeInviterRegistration, challenge.bytes)
+	input, err := network.SignatureInputForBytes(network.PurposePresence, challenge.bytes)
 	if err != nil {
 		return time.Time{}, err
 	}
