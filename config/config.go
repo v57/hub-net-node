@@ -34,8 +34,12 @@ const (
 	// Ticket signatures provide integrity, not operator trust or Sybil resistance.
 	AdmissionOpen = "open"
 
-	DefaultMaxConnections          = 256
-	DefaultMaxConnectionsPerSource = 16
+	// Every online device keeps a presence connection open, so the global
+	// bound is sized for a public node, and the per-source bound for many
+	// devices behind one NAT (it matches the per-source replay and UDP
+	// observation bounds).
+	DefaultMaxConnections          = 8192
+	DefaultMaxConnectionsPerSource = 256
 	DefaultHandshakeTimeout        = 10 * time.Second
 	DefaultMaxHeaderBytes          = 8 * 1024
 )

@@ -90,8 +90,8 @@ The node deliberately uses `admissionPolicy: open`: any self-hosted hub's device
 may present a self-contained signed grant. Signature validation proves grant
 integrity only; it is not operator trust or Sybil resistance, and devices never
 rely on it.
-`-max-connections` (default 256) and `-max-connections-per-source` (default 16)
-therefore bound sockets independently of attacker-rotatable Hub and agent keys.
+`-max-connections` (default 8192) and `-max-connections-per-source` (default
+256, so many devices behind one NAT fit) therefore bound sockets independently of attacker-rotatable Hub and agent keys.
 HTTP headers are capped at 8 KiB and incomplete handshakes expire after 10
 seconds. Authenticated UDP observations are capped at 16,384 globally and 256
 per source IP, then swept when their link or invitation ends. Private deployments
