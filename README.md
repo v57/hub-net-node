@@ -94,10 +94,23 @@ rely on it.
 therefore bound sockets independently of attacker-rotatable Hub and agent keys.
 HTTP headers are capped at 8 KiB and incomplete handshakes expire after 10
 seconds. Authenticated UDP observations are capped at 16,384 globally and 256
-per source IP, then swept when their link or invitation ends. Deploy behind a source-preserving
-reverse proxy; otherwise TCP limits see the proxy address. Private deployments
+per source IP, then swept when their link or invitation ends. Private deployments
 needing Hub allowlists must add an external admission proxy until a trusted-Hub
 policy is implemented.
+
+Behind a TLS-terminating TCP proxy, pass `-proxy-protocol-from` with the
+proxy's addresses or CIDRs (comma-separated). Connections from those peers must
+begin with a PROXY protocol v1 or v2 header, and the declared client address
+feeds admission limits, replay bounds and logs; a headerless connection from a
+trusted peer is closed. Connections from other peers keep their own address
+and cannot claim another. Without the flag, TCP limits see the proxy address.
+v1 `UNKNOWN` and v2 `LOCAL` headers (proxy health checks) keep the proxy's.
+
+Agents send their UDP probe to the port of the node URL they were given, so
+UDP must reach the node directly on that port with the client's source address
+intact. `-udp-listen` binds UDP separately from `-listen` (default: the same
+address), so the node can take UDP 443 while the proxy holds TCP 443 and the
+node's TCP listener stays on loopback.
 
 ## Container
 

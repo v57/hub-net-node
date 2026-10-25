@@ -205,6 +205,21 @@ func (s *Server) Run(ctx context.Context) error {
 	s.actualAddress = listener.Addr().String()
 	s.mu.Unlock()
 	s.logger.Info("node listening", slog.String("address", listener.Addr().String()))
+	udpListenAddress := s.cfg.UDPListenAddress
+	if udpListenAddress == "" {
+		udpListenAddress = listener.Addr().String()
+	}
+	if len(s.cfg.TrustedProxies) > 0 {
+		listener = newProxyProtocolListener(
+			listener,
+			s.cfg.TrustedProxies,
+			s.cfg.HandshakeTimeout,
+			s.cfg.MaxConnections,
+			func(source string, err error) {
+				s.logger.Warn("proxy protocol rejected", slog.String("proxy", source), slog.String("err", err.Error()))
+			},
+		)
+	}
 	listener = newAdmissionListener(
 		listener,
 		s.cfg.MaxConnections,
@@ -216,7 +231,7 @@ func (s *Server) Run(ctx context.Context) error {
 		},
 	)
 
-	udpAddress, err := net.ResolveUDPAddr("udp", listener.Addr().String())
+	udpAddress, err := net.ResolveUDPAddr("udp", udpListenAddress)
 	if err != nil {
 		_ = listener.Close()
 		return fmt.Errorf("hubnetnode: resolve UDP observation address: %w", err)
@@ -227,6 +242,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("hubnetnode: listen UDP observation %s: %w", udpAddress, err)
 	}
 	defer udpConn.Close()
+	s.logger.Info("udp observation listening", slog.String("address", udpConn.LocalAddr().String()))
 	udpStopped := make(chan struct{})
 	go s.serveUDPObservations(runCtx.Done(), udpConn, udpStopped)
 

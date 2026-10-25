@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/v57/hub-net-node/logging"
@@ -61,6 +63,15 @@ type Config struct {
 	// ListenAddress is the HTTP/WebSocket bind endpoint. Defaults to
 	// DefaultListenAddress.
 	ListenAddress string `json:"listenAddress,omitempty"`
+	// UDPListenAddress is the UDP observation bind endpoint. Empty binds UDP on
+	// the TCP listener's address. Agents probe UDP on the port of the node URL
+	// they were given, so behind a TLS proxy on TCP 443 this is ":443" while
+	// ListenAddress stays on loopback.
+	UDPListenAddress string `json:"udpListenAddress,omitempty"`
+	// TrustedProxies are the TCP peers whose connections must begin with a
+	// PROXY protocol (v1 or v2) header naming the real client. Empty disables
+	// PROXY protocol: every connection is attributed to its TCP peer.
+	TrustedProxies []netip.Prefix `json:"trustedProxies,omitempty"`
 	// StateDir holds the trusted Hub public key and runtime state. Defaults
 	// to DefaultStateDir().
 	StateDir string `json:"stateDir,omitempty"`
@@ -194,6 +205,33 @@ func validateLimits(limits protocol.Limits) error {
 		return fmt.Errorf("config: candidateLifetime %s exceeds protocol default %s", limits.CandidateLifetime, protocol.DefaultCandidateLifetime)
 	}
 	return nil
+}
+
+// ParseTrustedProxies parses a comma-separated list of CIDR prefixes or bare
+// addresses (single-host prefixes).
+func ParseTrustedProxies(value string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if !strings.Contains(item, "/") {
+			ip, err := netip.ParseAddr(item)
+			if err != nil || ip.Zone() != "" {
+				return nil, fmt.Errorf("config: trusted proxy %q is not an address or prefix", item)
+			}
+			ip = ip.Unmap()
+			prefixes = append(prefixes, netip.PrefixFrom(ip, ip.BitLen()))
+			continue
+		}
+		prefix, err := netip.ParsePrefix(item)
+		if err != nil {
+			return nil, fmt.Errorf("config: trusted proxy %q is not an address or prefix", item)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 // EnsureStateDir creates StateDir with restrictive permissions when absent.

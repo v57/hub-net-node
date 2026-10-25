@@ -97,3 +97,27 @@ func statMode(path string) (os.FileMode, error) {
 	}
 	return info.Mode(), nil
 }
+
+func TestParseTrustedProxies(t *testing.T) {
+	prefixes, err := ParseTrustedProxies(" 127.0.0.1, ::1 ,10.1.2.3/8,::ffff:192.0.2.1,")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"127.0.0.1/32", "::1/128", "10.0.0.0/8", "192.0.2.1/32"}
+	if len(prefixes) != len(want) {
+		t.Fatalf("prefixes = %v", prefixes)
+	}
+	for i, prefix := range prefixes {
+		if prefix.String() != want[i] {
+			t.Fatalf("prefix %d = %s, want %s", i, prefix, want[i])
+		}
+	}
+	if empty, err := ParseTrustedProxies(""); err != nil || len(empty) != 0 {
+		t.Fatalf("empty = %v, %v", empty, err)
+	}
+	for _, bad := range []string{"nginx", "10.0.0.0/33", "fe80::1%en0"} {
+		if _, err := ParseTrustedProxies(bad); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+}

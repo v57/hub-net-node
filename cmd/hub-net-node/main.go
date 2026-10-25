@@ -17,6 +17,8 @@ import (
 func main() {
 	nodeID := flag.String("node-id", config.DefaultNodeID, "stable rendezvous node identifier")
 	listen := flag.String("listen", config.DefaultListenAddress, "HTTP/WebSocket bind address")
+	udpListen := flag.String("udp-listen", "", "UDP observation bind address (default: the -listen address); must be the port of the node URL agents use")
+	proxyProtocolFrom := flag.String("proxy-protocol-from", "", "comma-separated proxy addresses or CIDRs whose TCP connections carry a PROXY protocol v1/v2 header")
 	stateDir := flag.String("state-dir", config.DefaultStateDir(), "node state directory")
 	logJSON := flag.Bool("log-json", true, "emit JSON structured logs")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -34,6 +36,7 @@ func main() {
 	cfg := config.Defaults()
 	cfg.NodeID = *nodeID
 	cfg.ListenAddress = *listen
+	cfg.UDPListenAddress = *udpListen
 	cfg.StateDir = *stateDir
 	cfg.MaxConnections = *maxConnections
 	cfg.MaxConnectionsPerSource = *maxConnectionsPerSource
@@ -47,6 +50,12 @@ func main() {
 		cfg.LogFormat = logging.FormatText
 	}
 	logger := logging.New(logging.Options{Format: cfg.LogFormat})
+	trustedProxies, err := config.ParseTrustedProxies(*proxyProtocolFrom)
+	if err != nil {
+		logger.Error("node configuration failed", slog.String("err", err.Error()))
+		os.Exit(1)
+	}
+	cfg.TrustedProxies = trustedProxies
 
 	agent, err := hubnetnode.New(hubnetnode.Options{Config: cfg, Logger: logger})
 	if err != nil {
