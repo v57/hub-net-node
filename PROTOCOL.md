@@ -89,10 +89,10 @@ and may open the hub's port), `gateway` (adds `0.0.0.0/0` and `::/0`) or `share`
    second until the link is ready. The node records only the datagram source and
    acknowledges `{version, linkId}`.
 5. Each side may send `link.offer` with the `linkId` and up to 16
-   `{address, port}` host candidates (LAN, global IPv6).
+   `{address, port}` host candidates as `endpoints` (LAN, global IPv6).
 6. Once the target accepted and both sides were observed, the node pushes
    `link.ready` to both: the `linkId`, the other side as `peerKey`, its
-   node-observed endpoint as `observedEndpoint`, its declared `candidates` and a
+   node-observed endpoint as `observedEndpoint`, its declared `endpoints` and a
    `punchAt` time about a second ahead. Later offers push `link.ready` again.
 7. At `punchAt` both devices set the other as a WireGuard peer, with the
    endpoint to try, and WireGuard's own handshakes open the NAT mappings from
