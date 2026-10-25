@@ -103,9 +103,9 @@ protocol rejected`. Admission rejections log the client address, not
 
 A Hub owner sets the node with `hub/net/node/set` to `wss://net.v57.dev`.
 Inviters register there and put the same node in their invitation codes, so
-joiners land on the node that holds the inviter. hub-server's built-in default
-is still `wss://v57.dev:1964`; change `defaultHubNetNode` in
-`Core/hub-server/src/network/node-store.ts` to make this node the default.
+joiners land on the node that holds the inviter. It is already the default in
+hub-server (`defaultHubNetNode`), the Swift HubServer (`defaultNode`) and the
+Hub app, so only Hubs whose owner set another node need this.
 
 ## Upgrade
 
