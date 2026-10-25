@@ -14,8 +14,10 @@ curl --fail http://127.0.0.1:1964/healthz
 ```
 
 Set unique `HUB_NET_NODE_ID` and desired bind address in
-`/etc/default/hub-net-node`. Allow inbound TCP and UDP 1964, or selected port, through
-host and cloud firewalls. Put TLS reverse proxy in front for public deployment.
+`/etc/default/hub-net-node`; `HUB_NET_NODE_ARGS` adds flags such as
+`--udp-listen` and `--proxy-protocol-from`. Allow inbound TCP and UDP 1964, or selected port, through
+host and cloud firewalls. Put TLS reverse proxy in front for public deployment;
+[`deploy/net.v57.dev`](../../deploy/net.v57.dev/README.md) is a complete recipe.
 
 ## Upgrade
 

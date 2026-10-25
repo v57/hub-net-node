@@ -110,7 +110,8 @@ Agents send their UDP probe to the port of the node URL they were given, so
 UDP must reach the node directly on that port with the client's source address
 intact. `-udp-listen` binds UDP separately from `-listen` (default: the same
 address), so the node can take UDP 443 while the proxy holds TCP 443 and the
-node's TCP listener stays on loopback.
+node's TCP listener stays on loopback. [`deploy/net.v57.dev`](deploy/net.v57.dev/README.md)
+deploys it that way behind nginx.
 
 ## Container
 

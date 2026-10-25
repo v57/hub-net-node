@@ -1,2 +1,4 @@
 HUB_NET_NODE_ID=public-1
 HUB_NET_NODE_LISTEN=:1964
+# Extra flags, split on spaces, e.g. "--udp-listen=:443 --proxy-protocol-from=127.0.0.1,::1"
+HUB_NET_NODE_ARGS=

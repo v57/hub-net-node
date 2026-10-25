@@ -1,0 +1,6 @@
+# /etc/default/hub-net-node for net.v57.dev
+# nginx terminates TLS on TCP 443 and forwards to the loopback listener with a
+# PROXY protocol header; UDP 443 reaches the node directly.
+HUB_NET_NODE_ID=n1
+HUB_NET_NODE_LISTEN=127.0.0.1:1964
+HUB_NET_NODE_ARGS=--udp-listen=:443 --proxy-protocol-from=127.0.0.1

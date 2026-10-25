@@ -9,7 +9,7 @@ Type=simple
 User=hub-net-node
 Group=hub-net-node
 EnvironmentFile=-/etc/default/hub-net-node
-ExecStart=/usr/bin/hub-net-node --node-id=${HUB_NET_NODE_ID} --listen=${HUB_NET_NODE_LISTEN} --state-dir=/var/lib/hub-net-node
+ExecStart=/usr/bin/hub-net-node --node-id=${HUB_NET_NODE_ID} --listen=${HUB_NET_NODE_LISTEN} --state-dir=/var/lib/hub-net-node $HUB_NET_NODE_ARGS
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=yes
