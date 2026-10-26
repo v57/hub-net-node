@@ -71,7 +71,8 @@ a hub-signed `PeerLinkGrant`:
 signed by `hubKey` under `hub-network/peer-link/v1` over the canonical JSON
 without `signature`, lifetime at most 31 days. `purpose` is `hub` (a member and
 the hub's machine: the member routes the machine's overlay addresses through it
-and may open the hub's port), `gateway` (adds `0.0.0.0/0` and `::/0`) or `share`.
+and may open the hub's port, plus the ports of the shares the machine fronts
+that the member may open), `gateway` (adds `0.0.0.0/0` and `::/0`) or `share`.
 
 1. Both devices are present. Either side sends `link.open` with the grant; its
    registered `serviceKey` must be `a.key` or `b.key`. The node checks the
