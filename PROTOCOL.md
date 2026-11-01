@@ -73,7 +73,17 @@ without `signature`, lifetime at most 31 days. `purpose` is `hub` (a member and
 the hub's machine: the member routes the machine's overlay addresses through it
 and may open the hub's port, plus the ports of the shares the machine fronts
 that the member may open; the machine may open the ports of the member's own
-shares it may open), `gateway` (adds `0.0.0.0/0` and `::/0`) or `share`.
+shares it may open), `gateway` (adds `0.0.0.0/0` and `::/0`) or `share` (a
+member and another member whose device fronts shares the member may open, up to
+15 of them besides the hub link: `a` is the member, `b` the other member's
+agent, `aToB` those shares' ports and `bToA` empty, so an iPad reaches an
+iPhone's camera without passing the hub's machine; the hub's machine is never a
+side of one, its hub links reach both ways). Two members fronting shares the
+other may open each get their own `share` grant to the other; a device takes
+one WireGuard peer for both, routing the other's addresses and opening the ports
+of both grants. Routes always name only the other side's own addresses. The hub
+issues a new grant when the shares change, so a device opens ports only the
+latest grants name.
 
 1. Both devices are present. Either side sends `link.open` with the grant; its
    registered `serviceKey` must be `a.key` or `b.key`. The node checks the
@@ -106,7 +116,8 @@ shares it may open), `gateway` (adds `0.0.0.0/0` and `::/0`) or `share`.
 
 No endpoint or candidate of either side is disclosed before the target accepts.
 A device may have 16 links at once; a target receives at most 10 link openings a
-minute.
+minute. A device itself links at most 16 devices: grants past that, hub links
+first, are left out, and a `link.incoming` from a 17th device is rejected.
 
 ## Invitation bootstrap signaling
 
