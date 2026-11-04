@@ -10,7 +10,7 @@ GOARCH ?= $(shell $(GO) env GOARCH)
 all: build
 
 build:
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -trimpath \
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -trimpath -tags release \
 		-ldflags="-s -w -X github.com/v57/hub-net-node/version.Build=$(VERSION)" \
 		-o build/hub-net-node ./cmd/hub-net-node
 

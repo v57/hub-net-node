@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"log/slog"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -52,21 +52,25 @@ func main() {
 	logger := logging.New(logging.Options{Format: cfg.LogFormat})
 	trustedProxies, err := config.ParseTrustedProxies(*proxyProtocolFrom)
 	if err != nil {
-		logger.Error("node configuration failed", slog.String("err", err.Error()))
-		os.Exit(1)
+		fatal("node configuration failed", err)
 	}
 	cfg.TrustedProxies = trustedProxies
 
 	agent, err := hubnetnode.New(hubnetnode.Options{Config: cfg, Logger: logger})
 	if err != nil {
-		logger.Error("node configuration failed", slog.String("err", err.Error()))
-		os.Exit(1)
+		fatal("node configuration failed", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := agent.Run(ctx); err != nil && ctx.Err() == nil {
-		logger.Error("node run failed", slog.String("err", err.Error()))
-		os.Exit(1)
+		fatal("node run failed", err)
 	}
+}
+
+// fatal says why the node won't start, in release builds too, which keep no logs:
+// these errors come from its own configuration and listeners, not from clients.
+func fatal(message string, err error) {
+	fmt.Fprintf(os.Stderr, "hub-net-node: %s: %v\n", message, err)
+	os.Exit(1)
 }

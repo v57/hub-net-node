@@ -3,7 +3,7 @@ FROM golang:1.26-alpine AS build
 WORKDIR /src/hub-net-node
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN CGO_ENABLED=0 go build -trimpath -tags release \
     -ldflags="-s -w -X github.com/v57/hub-net-node/version.Build=${VERSION}" \
     -o /out/hub-net-node ./cmd/hub-net-node
 

@@ -63,7 +63,7 @@ sudo systemd-sysusers /usr/lib/sysusers.d/hub-net-node.conf
 sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/hub-net-node.conf
 sudo systemctl daemon-reload
 sudo systemctl enable --now hub-net-node
-journalctl -u hub-net-node -n 5   # "node listening" 127.0.0.1:1964, "udp observation listening" [::]:443
+systemctl status hub-net-node     # release builds keep no logs: the checks below show it's listening
 ```
 
 `HUB_NET_NODE_ID` (`n1`) is the node's identifier. Keep it stable for this
@@ -95,9 +95,11 @@ curl -sS http://127.0.0.1:1964/healthz                               # refused: 
 sudo ss -ulpn 'sport = :443'                                         # hub-net-node holds UDP 443
 ```
 
-A headerless connection from `127.0.0.1` is closed and logged as `proxy
-protocol rejected`. Admission rejections log the client address, not
-`127.0.0.1`.
+A headerless connection from `127.0.0.1` is closed. Release builds keep no logs,
+so the node and nginx hold no record of client addresses, keys or links. To see
+them while debugging, build without `-tags release`: then that connection is
+logged as `proxy protocol rejected`, and admission rejections log the client
+address, not `127.0.0.1`.
 
 ## Point Hubs at it
 

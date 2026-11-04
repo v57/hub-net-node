@@ -124,6 +124,8 @@ func New(options Options) (*Server, error) {
 		WriteTimeout:      cfg.HandshakeTimeout,
 		IdleTimeout:       cfg.Limits.SessionLifetime,
 		MaxHeaderBytes:    cfg.MaxHeaderBytes,
+		// net/http names client addresses in its errors; they go where the node's logs go, not to stderr.
+		ErrorLog: slog.NewLogLogger(server.logger.Handler(), slog.LevelWarn),
 	}
 	server.httpServer = httpServer
 	return server, nil

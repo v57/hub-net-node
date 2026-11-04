@@ -41,6 +41,9 @@ type Options struct {
 
 // New constructs a *slog.Logger from options.
 func New(options Options) *slog.Logger {
+	if !logsEnabled {
+		return slog.New(slog.DiscardHandler)
+	}
 	writer := options.Writer
 	if writer == nil {
 		writer = os.Stderr
@@ -70,6 +73,9 @@ func New(options Options) *slog.Logger {
 // recorded under the key "component" so subsystems can be filtered without
 // per-call attributes.
 func Component(base *slog.Logger, name string) *slog.Logger {
+	if !logsEnabled {
+		return slog.New(slog.DiscardHandler)
+	}
 	if base == nil {
 		return slog.Default().With(slog.String("component", name))
 	}
