@@ -25,11 +25,20 @@ var (
 )
 
 const (
-	DefaultSetupLifetime     = time.Minute
-	DefaultReadyLifetime     = 2 * time.Minute
-	DefaultMaxLinksPerKey    = 16
+	DefaultSetupLifetime  = time.Minute
+	DefaultReadyLifetime  = 2 * time.Minute
+	DefaultMaxLinksPerKey = 16
+	// DefaultIncomingPerMinute is what one Hub key may open toward one device, so one key can't use up another's.
 	DefaultIncomingPerMinute = 10
-	DefaultMaxCandidates     = 16
+	// DefaultIncomingTotalPerMinute bounds opens toward one device from Hub keys it never accepted. Self-made keys are
+	// free, so this only caps the work; a key the device accepted before isn't held to it, so strangers can't crowd
+	// out a Hub the node has seen the device accept. A first link after the node restarted still competes with them.
+	DefaultIncomingTotalPerMinute = 60
+	// DefaultMaxKnownHubKeys is how many accepted Hub keys the node remembers per device.
+	DefaultMaxKnownHubKeys = 32
+	// maxKnownTargets bounds how many devices the node remembers accepted Hub keys for.
+	maxKnownTargets      = 65536
+	DefaultMaxCandidates = 16
 )
 
 // Side is one device of a link as the node sees it.
@@ -73,8 +82,10 @@ type Options struct {
 	ReadyLifetime     time.Duration
 	MaxLinksPerKey    int
 	IncomingPerMinute int
-	MaxCandidates     int
-	Now               func() time.Time
+	// IncomingTotalPerMinute is DefaultIncomingTotalPerMinute.
+	IncomingTotalPerMinute int
+	MaxCandidates          int
+	Now                    func() time.Time
 }
 
 type tokenRef struct {
@@ -84,12 +95,17 @@ type tokenRef struct {
 
 // Store is the concurrency-safe set of links.
 type Store struct {
-	mu       sync.Mutex
-	links    map[string]*Link
-	byGrant  map[string]string
-	byToken  map[string]tokenRef
-	incoming map[string][]time.Time
-	options  Options
+	mu      sync.Mutex
+	links   map[string]*Link
+	byGrant map[string]string
+	byToken map[string]tokenRef
+	// incoming holds recent opens per (Hub key, target), strangers those of keys the target never accepted, per target.
+	incoming  map[string][]time.Time
+	strangers map[string][]time.Time
+	// known holds, per target, the Hub keys it accepted a link from, most recent last.
+	known     map[string][]string
+	lastSweep time.Time
+	options   Options
 }
 
 func New(options Options) *Store {
@@ -105,6 +121,9 @@ func New(options Options) *Store {
 	if options.IncomingPerMinute <= 0 {
 		options.IncomingPerMinute = DefaultIncomingPerMinute
 	}
+	if options.IncomingTotalPerMinute <= 0 {
+		options.IncomingTotalPerMinute = DefaultIncomingTotalPerMinute
+	}
 	if options.MaxCandidates <= 0 {
 		options.MaxCandidates = DefaultMaxCandidates
 	}
@@ -112,11 +131,13 @@ func New(options Options) *Store {
 		options.Now = time.Now
 	}
 	return &Store{
-		links:    make(map[string]*Link),
-		byGrant:  make(map[string]string),
-		byToken:  make(map[string]tokenRef),
-		incoming: make(map[string][]time.Time),
-		options:  options,
+		links:     make(map[string]*Link),
+		byGrant:   make(map[string]string),
+		byToken:   make(map[string]tokenRef),
+		incoming:  make(map[string][]time.Time),
+		strangers: make(map[string][]time.Time),
+		known:     make(map[string][]string),
+		options:   options,
 	}
 }
 
@@ -142,20 +163,30 @@ func (s *Store) Open(grant network.PeerLinkGrant, openerKey string) (Link, *Link
 		old := s.removeLocked(id)
 		replaced = &old
 	}
-	if s.countLocked(openerKey) >= s.options.MaxLinksPerKey || s.countLocked(target) >= s.options.MaxLinksPerKey {
+	known := s.isKnownLocked(target, grant.HubKey)
+	if s.countLocked(openerKey) >= s.options.MaxLinksPerKey || s.targetCountLocked(target, grant.HubKey, known) >= s.options.MaxLinksPerKey {
 		return Link{}, replaced, ErrLinkLimit
 	}
-	recent := s.incoming[target][:0]
-	for _, at := range s.incoming[target] {
-		if now.Sub(at) < time.Minute {
-			recent = append(recent, at)
-		}
+	if now.Sub(s.lastSweep) >= time.Minute {
+		sweepBudget(s.incoming, now)
+		sweepBudget(s.strangers, now)
+		s.lastSweep = now
 	}
+	pair := target + "\x00" + grant.HubKey
+	recent := recentOpens(s.incoming[pair], now)
 	if len(recent) >= s.options.IncomingPerMinute {
-		s.incoming[target] = recent
+		s.incoming[pair] = recent
 		return Link{}, replaced, ErrRateLimited
 	}
-	s.incoming[target] = append(recent, now)
+	if !known {
+		total := recentOpens(s.strangers[target], now)
+		if len(total) >= s.options.IncomingTotalPerMinute {
+			s.strangers[target] = total
+			return Link{}, replaced, ErrRateLimited
+		}
+		s.strangers[target] = append(total, now)
+	}
+	s.incoming[pair] = append(recent, now)
 	created := &Link{
 		ID:        newID(),
 		Grant:     grant,
@@ -168,6 +199,70 @@ func (s *Store) Open(grant network.PeerLinkGrant, openerKey string) (Link, *Link
 	s.byToken[created.Opener.ProbeToken] = tokenRef{id: created.ID, opener: true}
 	s.byToken[created.Target.ProbeToken] = tokenRef{id: created.ID}
 	return copyLink(created), replaced, nil
+}
+
+func recentOpens(opens []time.Time, now time.Time) []time.Time {
+	recent := opens[:0]
+	for _, at := range opens {
+		if now.Sub(at) < time.Minute {
+			recent = append(recent, at)
+		}
+	}
+	return recent
+}
+
+func sweepBudget(budget map[string][]time.Time, now time.Time) {
+	for key, opens := range budget {
+		if recent := recentOpens(opens, now); len(recent) == 0 {
+			delete(budget, key)
+		} else {
+			budget[key] = recent
+		}
+	}
+}
+
+func (s *Store) isKnownLocked(target, hubKey string) bool {
+	for _, known := range s.known[target] {
+		if known == hubKey {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) rememberLocked(target, hubKey string) {
+	if _, ok := s.known[target]; !ok && len(s.known) >= maxKnownTargets {
+		for other := range s.known {
+			delete(s.known, other)
+			break
+		}
+	}
+	kept := s.known[target][:0]
+	for _, known := range s.known[target] {
+		if known != hubKey {
+			kept = append(kept, known)
+		}
+	}
+	kept = append(kept, hubKey)
+	if len(kept) > DefaultMaxKnownHubKeys {
+		kept = kept[len(kept)-DefaultMaxKnownHubKeys:]
+	}
+	s.known[target] = kept
+}
+
+// targetCountLocked is how many of the target's links count against this Hub key: a key the target accepted before
+// counts the links of such keys only, so strangers holding slots can't lock it out; a stranger counts them all.
+func (s *Store) targetCountLocked(target, hubKey string, known bool) int {
+	count := 0
+	for _, current := range s.links {
+		if current.Opener.Key != target && current.Target.Key != target {
+			continue
+		}
+		if !known || current.Accepted || s.isKnownLocked(target, current.Grant.HubKey) {
+			count++
+		}
+	}
+	return count
 }
 
 // Accept marks the link accepted by its target.
@@ -183,6 +278,7 @@ func (s *Store) Accept(id, key string) (Link, error) {
 		return Link{}, ErrNotTarget
 	}
 	current.Accepted = true
+	s.rememberLocked(current.Target.Key, current.Grant.HubKey)
 	s.markReadyLocked(current)
 	return copyLink(current), nil
 }

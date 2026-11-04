@@ -1,6 +1,10 @@
 package protocol
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -138,5 +142,40 @@ func TestBootstrapPendingCarriesExactTransactionIdentity(t *testing.T) {
 				t.Fatalf("inviter.bootstrap with %s accepted", name)
 			}
 		})
+	}
+}
+
+// The same values are checked in Swift (hub-app's CoordinatorClient), so both sides compute the same proof.
+func TestPresenceProofVector(t *testing.T) {
+	secret := bytes.Repeat([]byte{7}, 32)
+	proof := PresenceProof(secret, "target-key")
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte("hub-network/presence/v1\x00target-key"))
+	if want := base64.StdEncoding.EncodeToString(mac.Sum(nil)); proof != want {
+		t.Fatalf("proof = %s, want %s", proof, want)
+	}
+	if other := PresenceProof(secret, "another-key"); other == proof {
+		t.Fatal("a proof must be good for one target")
+	}
+	t.Logf("proof %s tag %s", proof, PresenceTag(proof))
+}
+
+func TestPresenceFieldsAreLimited(t *testing.T) {
+	limits := DefaultLimits()
+	tags := make([]string, MaximumPresenceTags+1)
+	for index := range tags {
+		tags[index] = "t"
+	}
+	for _, message := range []Envelope{
+		{MajorVersion: 1, Type: MessagePresenceTags, PresenceTags: tags},
+		{MajorVersion: 1, Type: MessagePresenceRegister, ServiceKey: "k", ChallengeNonce: "n", ChallengeSignature: "s", PresenceTags: tags},
+	} {
+		if err := message.Validate(time.Now(), limits); err == nil {
+			t.Fatalf("%s with %d tags passed", message.Type, len(tags))
+		}
+	}
+	// Tags go on nothing else
+	if err := (Envelope{MajorVersion: 1, Type: MessageLinkClose, LinkID: "l", PresenceTags: tags[:1]}).Validate(time.Now(), limits); err == nil {
+		t.Fatal("tags on link.close passed")
 	}
 }

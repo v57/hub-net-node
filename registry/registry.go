@@ -19,6 +19,7 @@ package registry
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -52,6 +53,9 @@ type Entry struct {
 	// send pushes an envelope to the agent's open connection so the node can
 	// notify it of an unregistration event. nil when no connection is bound.
 	send func(protocol.Envelope)
+	// tags are SHA-256 of the proofs the device's Hubs gave it. Without them (an older device, or a Hub that gave none)
+	// the device answers as it always did.
+	tags []string
 }
 
 // Challenge is a nonce issued to one connection. The connection keeps it;
@@ -165,10 +169,46 @@ func (r *Registry) Register(serviceKey string, challenge Challenge, signature st
 	}
 	if entry.owner != owner {
 		entry.send = nil
+		entry.tags = nil
 	}
 	entry.owner = owner
 	entry.ExpiresAt = now.Add(r.lease)
 	return entry.ExpiresAt, nil
+}
+
+// SetTags replaces the presence tags of the registration owner holds.
+func (r *Registry) SetTags(serviceKey string, owner any, tags []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if entry, ok := r.entries[serviceKey]; ok && entry.owner == owner {
+		entry.tags = append([]string(nil), tags...)
+	}
+}
+
+// Reachable is Online for someone asking to open a link: a device with presence tags looks offline to a caller whose
+// proof matches none of them, so the node says nothing about it without the secret. Every tag is compared, and a
+// missing device is compared against as many as the limit allows, so the answer doesn't show in its timing.
+func (r *Registry) Reachable(serviceKey, proof string) bool {
+	now := r.now()
+	tag := protocol.PresenceTag(proof)
+	r.mu.Lock()
+	entry, ok := r.entries[serviceKey]
+	var tags []string
+	if ok && entry.ExpiresAt.After(now) {
+		tags = entry.tags
+	} else {
+		ok = false
+	}
+	r.mu.Unlock()
+	matched := 0
+	for index := 0; index < protocol.MaximumPresenceTags; index++ {
+		known := tag + "-"
+		if index < len(tags) {
+			known = tags[index]
+		}
+		matched |= subtle.ConstantTimeCompare([]byte(known), []byte(tag))
+	}
+	return ok && (len(tags) == 0 || matched == 1)
 }
 
 // Online reports whether serviceKey is registered and within its

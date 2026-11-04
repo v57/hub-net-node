@@ -219,3 +219,130 @@ func TestLinkRejectionAndPresenceDropCloseIt(t *testing.T) {
 		t.Fatalf("after the target left = %+v", closed)
 	}
 }
+
+func registerWithTags(t *testing.T, address string, tags []string) testDevice {
+	t.Helper()
+	key, private := newKey(t)
+	conn := dialClient(t, address)
+	t.Cleanup(func() { conn.Close() })
+	sendEnvelope(t, conn, protocol.Envelope{MajorVersion: 1, Type: protocol.MessagePresenceRegister, RequestID: "c", ServiceKey: key})
+	challenge := readEnvelope(t, conn)
+	if challenge.MinorVersion != protocol.ChallengeMinorVersion {
+		t.Fatalf("challenge says minor %d", challenge.MinorVersion)
+	}
+	nonce, err := base64.RawURLEncoding.DecodeString(challenge.ChallengeNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := network.SignBytes(network.PurposePresence, nonce, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendEnvelope(t, conn, protocol.Envelope{
+		MajorVersion: 1, Type: protocol.MessagePresenceRegister, RequestID: "r", ServiceKey: key,
+		ChallengeNonce: challenge.ChallengeNonce, ChallengeSignature: signature, PresenceTags: tags,
+	})
+	if reply := readEnvelope(t, conn); reply.Type != protocol.MessagePresenceRegistered || reply.MinorVersion != 0 {
+		t.Fatalf("registered = %+v", reply)
+	}
+	return testDevice{key: key, private: private, conn: conn}
+}
+
+func openLinkWithProof(t *testing.T, opener testDevice, grant network.PeerLinkGrant, proof string) protocol.Envelope {
+	t.Helper()
+	sendEnvelope(t, opener.conn, protocol.Envelope{
+		MajorVersion: 1, Type: protocol.MessageLinkOpen, RequestID: "open", Grant: &grant, PresenceProof: proof,
+	})
+	return readEnvelope(t, opener.conn)
+}
+
+// A device with tags and no device at all give the same answer to anyone without the secret, and nothing reaches it.
+func TestWithoutThePresenceSecretTheNodeGivesNoAnswer(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	hubKey, hubPrivate := newHub(t)
+	secret := []byte("0123456789abcdef0123456789abcdef")
+
+	// The tag is for the target's own key, so register first, then state it
+	target := presentDevice(t, address)
+	proof := protocol.PresenceProof(secret, target.key)
+	sendEnvelope(t, target.conn, protocol.Envelope{MajorVersion: 1, Type: protocol.MessagePresenceTags, PresenceTags: []string{protocol.PresenceTag(proof)}})
+	time.Sleep(50 * time.Millisecond)
+
+	absentKey, absentPrivate := newKey(t)
+	absent := testDevice{key: absentKey, private: absentPrivate}
+	attacker := presentDevice(t, address)
+	attackerHub, attackerPrivate := newHub(t)
+
+	answers := map[string]protocol.Envelope{
+		"no proof, online":      openLink(t, attacker, signedGrant(t, attackerPrivate, attackerHub, attacker, target)),
+		"no proof, offline":     openLink(t, attacker, signedGrant(t, attackerPrivate, attackerHub, attacker, absent)),
+		"wrong secret":          openLinkWithProof(t, attacker, signedGrant(t, attackerPrivate, attackerHub, attacker, target), protocol.PresenceProof([]byte("guess"), target.key)),
+		"proof for another key": openLinkWithProof(t, attacker, signedGrant(t, attackerPrivate, attackerHub, attacker, target), protocol.PresenceProof(secret, attacker.key)),
+		"the tag used as proof": openLinkWithProof(t, attacker, signedGrant(t, attackerPrivate, attackerHub, attacker, target), protocol.PresenceTag(proof)),
+		"any proof, offline":    openLinkWithProof(t, attacker, signedGrant(t, attackerPrivate, attackerHub, attacker, absent), proof),
+	}
+	first, err := json.Marshal(answers["no proof, offline"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, answer := range answers {
+		if answer.Type != protocol.MessageError || answer.Error.Code != "peer_offline" {
+			t.Fatalf("%s = %+v", name, answer)
+		}
+		body, _ := json.Marshal(answer)
+		if string(body) != string(first) {
+			t.Fatalf("%s differs from an absent device: %s vs %s", name, body, first)
+		}
+	}
+	expectNothing(t, target.conn, 200*time.Millisecond)
+
+	// All of that used none of the target's budget, and the right proof opens
+	member := presentDevice(t, address)
+	reply := openLinkWithProof(t, member, signedGrant(t, hubPrivate, hubKey, member, target), proof)
+	if reply.Type != protocol.MessageLinkOpened {
+		t.Fatalf("with the proof = %+v", reply)
+	}
+	if incoming := readEnvelope(t, target.conn); incoming.Type != protocol.MessageLinkIncoming {
+		t.Fatalf("target got %+v", incoming)
+	}
+}
+
+func TestPresenceTagsFollowTheConnection(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	hubKey, hubPrivate := newHub(t)
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	first := protocol.PresenceTag(protocol.PresenceProof(secret, "unused"))
+	target := registerWithTags(t, address, []string{first})
+	proof := protocol.PresenceProof(secret, target.key)
+	member := presentDevice(t, address)
+	grant := signedGrant(t, hubPrivate, hubKey, member, target)
+	if reply := openLinkWithProof(t, member, grant, proof); reply.Type != protocol.MessageError || reply.Error.Code != "peer_offline" {
+		t.Fatalf("a tag for another proof = %+v", reply)
+	}
+	// presence.tags replaces them
+	sendEnvelope(t, target.conn, protocol.Envelope{MajorVersion: 1, Type: protocol.MessagePresenceTags, PresenceTags: []string{protocol.PresenceTag(proof)}})
+	time.Sleep(50 * time.Millisecond)
+	if reply := openLinkWithProof(t, member, grant, proof); reply.Type != protocol.MessageLinkOpened {
+		t.Fatalf("after presence.tags = %+v", reply)
+	}
+	// Someone else's connection can't set them: presence.tags needs a registered connection
+	stranger := dialClient(t, address)
+	defer stranger.Close()
+	sendEnvelope(t, stranger, protocol.Envelope{MajorVersion: 1, Type: protocol.MessagePresenceTags, PresenceTags: []string{"x"}})
+	if reply := readEnvelope(t, stranger); reply.Type != protocol.MessageError || reply.Error.Code != "unauthorized" {
+		t.Fatalf("presence.tags without presence = %+v", reply)
+	}
+}
+
+// What an older device does: no tags, no proofs, and it answers as it always did.
+func TestADeviceWithoutTagsAnswersAsBefore(t *testing.T) {
+	address, cleanup := runServer(t)
+	defer cleanup()
+	hubKey, hubPrivate := newHub(t)
+	target, member := presentDevice(t, address), presentDevice(t, address)
+	if reply := openLink(t, member, signedGrant(t, hubPrivate, hubKey, member, target)); reply.Type != protocol.MessageLinkOpened || reply.MinorVersion != 0 {
+		t.Fatalf("no tags, no proof = %+v", reply)
+	}
+}

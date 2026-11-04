@@ -73,7 +73,9 @@ func (s *Server) openLink(state *connState, envelope protocol.Envelope) {
 		s.writeError(state, "unauthorized", "not a side of the grant", false)
 		return
 	}
-	if !s.registry.Online(peer.Key) {
+	// Without the secret a device that registered tags looks exactly like one that isn't here: same answer, nothing
+	// pushed at it, none of its budget used. This comes before the budget for that reason.
+	if !s.registry.Reachable(peer.Key, envelope.PresenceProof) {
 		s.writeError(state, "peer_offline", "the other device is not present", true)
 		return
 	}

@@ -1,16 +1,22 @@
 package protocol
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
-	"time"
-
 	network "github.com/v57/hub-net-node/models"
+	"time"
 )
 
 const (
 	MajorVersion = 1
 	MinorVersion = 0
+	// ChallengeMinorVersion is what a node states in presence.challenge alone: 1 takes presence tags and proofs. A
+	// client sends those fields only after seeing it, because an older node refuses them. Every other message stays
+	// at MinorVersion, because an older app refuses a higher one on a bootstrap session and an older node on anything.
+	ChallengeMinorVersion = 1
 
 	DefaultMaxSessionsPerAgent = 16
 	DefaultMaxCandidates       = 16
@@ -86,6 +92,8 @@ const (
 	MessagePresenceChallenge    MessageType = "presence.challenge"
 	MessagePresenceRegistered   MessageType = "presence.registered"
 	MessagePresenceUnregistered MessageType = "presence.unregistered"
+	// MessagePresenceTags replaces the presence tags of a registered device, when its Hub gave it a new secret.
+	MessagePresenceTags MessageType = "presence.tags"
 
 	// Peer links between two present devices of a hub, named by a hub-signed grant
 	MessageLinkOpen     MessageType = "link.open"
@@ -180,6 +188,30 @@ type Envelope struct {
 	Endpoints []network.LinkEndpoint `json:"endpoints,omitempty"`
 	// PunchAt is the RFC3339 time both sides start their handshakes toward each other.
 	PunchAt string `json:"punchAt,omitempty"`
+	// PresenceTags are what the node checks a link.open's proof against: PresenceTag of this device's proof, one per
+	// Hub. A device with tags looks offline to anyone without the secret.
+	PresenceTags []string `json:"presenceTags,omitempty"`
+	// PresenceProof is PresenceProof(secret, target key), in link.open.
+	PresenceProof string `json:"presenceProof,omitempty"`
+}
+
+// MaximumPresenceTags bounds what one registration holds: a device on as many Hubs under one key.
+const MaximumPresenceTags = 8
+
+// PresenceProof is what an opener shows the node for one target: HMAC-SHA256(secret, domain || 0x00 || target key).
+// The secret stays with the Hub and its devices; the node sees only this value, good for this target alone.
+func PresenceProof(secret []byte, targetKey string) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte("hub-network/presence/v1"))
+	mac.Write([]byte{0})
+	mac.Write([]byte(targetKey))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// PresenceTag is what a device registers for a proof: SHA-256 of the proof, so a node's memory opens nothing.
+func PresenceTag(proof string) string {
+	sum := sha256.Sum256([]byte(proof))
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 // allowedFields lists, per message type, the optional fields it may carry; anything else is rejected, so no message
@@ -192,11 +224,12 @@ var allowedFields = map[MessageType][]string{
 	MessageCloseSession:         {"requestId", "sessionId"},
 	MessageBootstrapPending:     {"invitationCode", "key", "tokenDigest", "transactionId", "tunnelInstanceId", "generation"},
 	MessageError:                {"requestId", "error", "linkId", "sessionId"},
-	MessagePresenceRegister:     {"requestId", "serviceKey", "challengeNonce", "challengeSignature"},
+	MessagePresenceRegister:     {"requestId", "serviceKey", "challengeNonce", "challengeSignature", "presenceTags"},
+	MessagePresenceTags:         {"requestId", "presenceTags"},
 	MessagePresenceChallenge:    {"requestId", "serviceKey", "challengeNonce"},
 	MessagePresenceRegistered:   {"requestId", "serviceKey", "registrationExpiresAt"},
 	MessagePresenceUnregistered: {"serviceKey"},
-	MessageLinkOpen:             {"requestId", "grant"},
+	MessageLinkOpen:             {"requestId", "grant", "presenceProof"},
 	MessageLinkOpened:           {"requestId", "linkId", "probeToken", "peerKey"},
 	MessageLinkIncoming:         {"linkId", "grant", "probeToken", "peerKey"},
 	MessageLinkAccept:           {"requestId", "linkId"},
@@ -232,6 +265,8 @@ func (message Envelope) presentFields() []string {
 	add("challengeSignature", message.ChallengeSignature != "")
 	add("registrationExpiresAt", message.RegistrationExpiresAt != "")
 	add("grant", message.Grant != nil)
+	add("presenceTags", len(message.PresenceTags) > 0)
+	add("presenceProof", message.PresenceProof != "")
 	add("linkId", message.LinkID != "")
 	add("probeToken", message.ProbeToken != "")
 	add("peerKey", message.PeerKey != "")
@@ -307,6 +342,13 @@ func (message Envelope) Validate(now time.Time, limits Limits) error {
 		}
 		if (message.ChallengeNonce == "") != (message.ChallengeSignature == "") {
 			return errors.New("presence.register requires both nonce and signature or neither")
+		}
+		if len(message.PresenceTags) > MaximumPresenceTags {
+			return errors.New("presence.register names too many tags")
+		}
+	case MessagePresenceTags:
+		if len(message.PresenceTags) > MaximumPresenceTags {
+			return errors.New("presence.tags names too many tags")
 		}
 	case MessagePresenceChallenge:
 		if message.ServiceKey == "" || message.ChallengeNonce == "" {

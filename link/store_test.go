@@ -105,3 +105,83 @@ func TestSweepEndsUnreadyLinksAndCloseForKey(t *testing.T) {
 		t.Fatalf("CloseForKey = %d links, %d left", len(closed), store.Len())
 	}
 }
+
+func grantFromHub(id, hub, a, b string) network.PeerLinkGrant {
+	grant := grantBetween(id, a, b)
+	grant.HubKey = hub
+	return grant
+}
+
+func TestOneHubKeyCantUseUpAnothersBudget(t *testing.T) {
+	now := &clock{now: time.Unix(3_000_000, 0)}
+	store := New(Options{IncomingPerMinute: 3, Now: now.Now})
+	for i := range 3 {
+		if _, _, err := store.Open(grantFromHub(string(rune('0'+i)), "self-made", "attacker", "target"), "attacker"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := store.Open(grantFromHub("3", "self-made", "attacker", "target"), "attacker"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("fourth opening by one Hub key = %v", err)
+	}
+	if _, _, err := store.Open(grantFromHub("mine", "real", "member", "target"), "member"); err != nil {
+		t.Fatalf("another Hub key toward the same target = %v", err)
+	}
+}
+
+func TestKeysATargetNeverAcceptedShareATotal(t *testing.T) {
+	now := &clock{now: time.Unix(4_000_000, 0)}
+	store := New(Options{IncomingPerMinute: 2, IncomingTotalPerMinute: 5, MaxLinksPerKey: 1000, Now: now.Now})
+
+	// The target accepted this Hub once, which was its stranger's first open: it's no stranger from then on
+	first, _, err := store.Open(grantFromHub("first", "real", "member", "target"), "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Accept(first.ID, "target"); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range 4 {
+		hub := "self-made-" + string(rune('a'+i))
+		if _, _, err := store.Open(grantFromHub("s", hub, "attacker", "target"), "attacker"); err != nil {
+			t.Fatalf("stranger %d = %v", i, err)
+		}
+	}
+	if _, _, err := store.Open(grantFromHub("s", "self-made-z", "attacker", "target"), "attacker"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("a fifth self-made key = %v", err)
+	}
+	if _, _, err := store.Open(grantFromHub("second", "real", "member", "target"), "member"); err != nil {
+		t.Fatalf("a Hub the target accepted, past the total = %v", err)
+	}
+	// Another device's total is its own
+	if _, _, err := store.Open(grantFromHub("s", "self-made-z", "attacker", "elsewhere"), "attacker"); err != nil {
+		t.Fatalf("another target = %v", err)
+	}
+	now.now = now.now.Add(2 * time.Minute)
+	if _, _, err := store.Open(grantFromHub("s", "self-made-y", "attacker", "target"), "attacker"); err != nil {
+		t.Fatalf("after a minute = %v", err)
+	}
+}
+
+func TestStrangersHoldingSlotsDontLockOutAKnownHub(t *testing.T) {
+	store := New(Options{MaxLinksPerKey: 3, IncomingTotalPerMinute: 100})
+	first, _, err := store.Open(grantFromHub("first", "real", "member", "target"), "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Accept(first.ID, "target"); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		opener := "attacker-" + string(rune('a'+i))
+		if _, _, err := store.Open(grantFromHub("s", "self-made-"+opener, opener, "target"), opener); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := store.Open(grantFromHub("s", "self-made-c", "attacker-c", "target"), "attacker-c"); !errors.Is(err, ErrLinkLimit) {
+		t.Fatalf("a stranger past the slots = %v", err)
+	}
+	if _, _, err := store.Open(grantFromHub("second", "real", "member-2", "target"), "member-2"); err != nil {
+		t.Fatalf("a known Hub with strangers on the slots = %v", err)
+	}
+}

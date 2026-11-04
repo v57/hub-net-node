@@ -88,8 +88,8 @@ latest grants name.
 1. Both devices are present. Either side sends `link.open` with the grant; its
    registered `serviceKey` must be `a.key` or `b.key`. The node checks the
    signature against the grant's own `hubKey`, the lifetime and that the other
-   side is present (else retryable `peer_offline`). One live link exists per
-   (hubKey, grantId): a new open replaces the old one.
+   side is reachable (else retryable `peer_offline`; see Presence secret). One
+   live link exists per (hubKey, grantId): a new open replaces the old one.
 2. The node replies `link.opened` with an unpredictable `linkId`, the opener's
    `probeToken` and the target's key as `peerKey`, and pushes `link.incoming`
    to the target with the `linkId`, the `grant`, the opener as `peerKey` and the
@@ -115,9 +115,52 @@ latest grants name.
    hold the path themselves from then on.
 
 No endpoint or candidate of either side is disclosed before the target accepts.
-A device may have 16 links at once; a target receives at most 10 link openings a
-minute. A device itself links at most 16 devices: grants past that, hub links
-first, are left out, and a `link.incoming` from a 17th device is rejected.
+A device may have 16 links at once. A device itself links at most 16 devices:
+grants past that, hub links first, are left out, and a `link.incoming` from a 17th
+device is rejected.
+
+A grant's ports are what its Hub allows, not what opens: a device opens a port
+only if it's also on the device's own list, so a Hub can narrow what's reachable
+but never widen it. The node doesn't see that list.
+
+### Limits
+
+Anyone can make a Hub key and sign a grant naming any two devices, so limits are
+per Hub key, not only per target:
+
+- One Hub key opens at most 10 links a minute toward one target. One key can't
+  use up another's.
+- Hub keys the target never accepted share 60 openings a minute toward it. Self-made
+  keys are free, so this bounds the work done for one target and nothing else. A
+  Hub key the target accepted since the node started isn't held to it, and links
+  of keys it never accepted don't count against such a key's 16 link slots. The
+  node keeps this in memory, up to 32 keys per target, so after a restart a Hub's
+  first link competes with strangers on a device that has no presence tags.
+
+### Presence secret
+
+Each Hub keeps a random 32-byte secret and gives it to its authenticated members in
+`network/links` (`presenceSecret`). The node never sees it:
+
+    proof = base64(HMAC-SHA256(secret, "hub-network/presence/v1" || 0x00 || target serviceKey))
+    tag   = base64(SHA-256(proof))
+
+A device registers `presenceTags` (the tag of the proof for its own key, at most 8)
+in its answering `presence.register`, and sends `presence.tags` when they change. An
+opener puts the proof for the target in `link.open` as `presenceProof`. A target
+with tags that gets no matching proof answers exactly as if it weren't present:
+retryable `peer_offline`, no `link.incoming`, none of its budget used.
+
+A node states it takes these fields with `minorVersion: 1` in `presence.challenge`,
+and nowhere else: every other message stays at minor 0, because older clients refuse
+higher on a bootstrap session. A client sends minor 0 and the new fields only to a
+node that stated 1, since an older node refuses unknown fields. A device with no
+tags (an older device, or a Hub with no secret yet) answers as it always did. A
+new connection without tags clears the old ones; a renewal without tags keeps them.
+
+What stays: an operator of the node sees who registers and who links with whom; a
+member removed from a Hub keeps the secret until the Hub changes it; an invitation's
+holder can tell whether its inviter is present until it expires.
 
 ## Invitation bootstrap signaling
 

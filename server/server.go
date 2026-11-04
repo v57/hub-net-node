@@ -445,7 +445,7 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			}
 			state.challenge = challenge
 			s.writeEnvelope(state, protocol.Envelope{
-				MajorVersion: protocol.MajorVersion, MinorVersion: protocol.MinorVersion,
+				MajorVersion: protocol.MajorVersion, MinorVersion: protocol.ChallengeMinorVersion,
 				Type: protocol.MessagePresenceChallenge, RequestID: envelope.RequestID,
 				ServiceKey: envelope.ServiceKey, ChallengeNonce: challenge.Nonce,
 			})
@@ -465,6 +465,10 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 		s.logger.Info("presence registered", "key", keyTag(envelope.ServiceKey), "from", state.source, "renewed", renewed,
 			"expiresAt", expiry.UTC().Format(time.RFC3339))
 		state.serviceKey = envelope.ServiceKey
+		// A renewal without tags keeps them; a new connection without tags had them cleared by Register.
+		if len(envelope.PresenceTags) > 0 {
+			s.registry.SetTags(envelope.ServiceKey, state, envelope.PresenceTags)
+		}
 		// Bind a write callback so the node can push bootstrap requests and links to this connection.
 		s.registry.Bind(envelope.ServiceKey, state, func(reply protocol.Envelope) { s.writeEnvelope(state, reply) })
 		s.writeEnvelope(state, protocol.Envelope{
@@ -472,6 +476,13 @@ func (s *Server) processEnvelope(_ context.Context, state *connState, payload []
 			Type: protocol.MessagePresenceRegistered, RequestID: envelope.RequestID,
 			ServiceKey: envelope.ServiceKey, RegistrationExpiresAt: expiry.UTC().Format(time.RFC3339Nano),
 		})
+		return false
+	case protocol.MessagePresenceTags:
+		if state.serviceKey == "" {
+			s.writeError(state, "unauthorized", "register presence first", false)
+			return false
+		}
+		s.registry.SetTags(state.serviceKey, state, envelope.PresenceTags)
 		return false
 	case protocol.MessageOpenSession:
 		{
